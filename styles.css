@@ -18,3 +18,15 @@ p { margin:0; color:#c8cbd2; max-height:3.6em; overflow:hidden; }
 button { background:#222734; color:var(--fg); border:1px solid var(--border); border-radius:8px; padding:6px 10px; cursor:pointer; }
 button:hover { border-color:var(--accent); }
 a { color:var(--accent); text-decoration:none; margin-left:auto; }
+.summary {
+  font-size: 13px;
+  color: #d0d3d9;
+  padding: 4px 0;
+  border-top: 1px solid var(--border);
+}
+.card {
+  cursor: pointer;
+}
+.card button, .card a {
+  cursor: default;
+}

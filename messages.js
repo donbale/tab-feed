@@ -1,0 +1,11 @@
+// messages.js (optional shared constants)
+export const MSG = {
+  PANEL_PING: "PANEL_PING",
+  TAB_CONTENT: "TAB_CONTENT",
+  TAB_SUMMARY: "TAB_SUMMARY",
+  INJECT_BRIDGE: "INJECT_BRIDGE",
+  FOCUS_TAB: "FOCUS_TAB",
+  CLOSE_TAB: "CLOSE_TAB",
+  PIN_TOGGLE: "PIN_TOGGLE",
+  TABS_UPDATED: "TABS_UPDATED"
+};
