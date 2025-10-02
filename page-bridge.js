@@ -1,56 +1,60 @@
-// page-bridge.js — injected into PAGE world via chrome.scripting (world: "MAIN")
-// Now with hard timeouts so the content script never hangs on "Generating…"
+// page-bridge.js  (MAIN world)
+// --- boot ping so content.js knows we're alive ASAP
+window.postMessage({ __tabfeed: "BRIDGE_READY" }, "*");
 
 (function () {
-  const OK_LANGS = new Set(["en", "es", "ja"]);
+  const OK = new Set(["en","es","ja"]);
+  const pick = l => (l = (l||"en").slice(0,2).toLowerCase(), OK.has(l) ? l : "en");
 
-  function pickLang(raw) {
-    const l = (raw || "en").slice(0, 2).toLowerCase();
-    return OK_LANGS.has(l) ? l : "en";
-  }
+  let instance = null;    // singleton
+  let creating = null;
 
-  function withTimeout(promise, ms, label) {
+  function withTimeout(p, ms, label="timeout") {
     return Promise.race([
-      promise,
-      new Promise((_, rej) => setTimeout(() => rej(new Error(label || "timeout")), ms)),
+      p,
+      new Promise((_, rej) => setTimeout(() => rej(new Error(label)), ms))
     ]);
   }
 
-  async function getCaps(API) {
-    try {
-      if (typeof API.capabilities === "function") {
-        return await withTimeout(API.capabilities(), 3000, "caps-timeout");
-      }
-      if (typeof API.availability === "function") {
-        return await withTimeout(API.availability(), 3000, "caps-timeout");
-      }
-    } catch (e) {
-      return { available: "no", error: String(e) };
-    }
-    return { available: "no" };
+  async function getAPI() {
+    // Prefer window.Summarizer if present, else ai.summarizer
+    return globalThis.Summarizer || (globalThis.ai && globalThis.ai.summarizer) || null;
   }
 
-  async function ensureSummarizer(lang) {
-    const API = globalThis.Summarizer || (globalThis.ai && globalThis.ai.summarizer);
-    if (!API) return { ok: false, error: "no-api" };
-
-    const caps = await getCaps(API);
-    if (!caps || caps.available === "no") return { ok: false, error: caps?.available || "no" };
+  async function ensureInstance(lang) {
+    const API = await getAPI();
+    if (!API) return { ok:false, error:"no-api" };
 
     try {
-      // Some builds reject format at create time; pass only length & output
-      const inst = await withTimeout(
-        API.create({ type: "key-points", length: "short", output: { language: lang } }),
-        8000,
-        "create-timeout"
-      );
-      return { ok: true, inst };
+      const caps = API.capabilities ? await withTimeout(API.capabilities(), 2500, "caps-timeout")
+                                    : await withTimeout(API.availability(), 2500, "caps-timeout");
+      if (!caps || caps.available === "no") return { ok:false, error:"no" };
     } catch (e) {
-      return { ok: false, error: String(e && e.message ? e.message : e) };
+      return { ok:false, error:"caps-failed" };
     }
+
+    if (instance) return { ok:true, inst: instance };
+    if (creating)  return creating;
+
+    creating = (async () => {
+      try {
+        // Keep create() minimal (some builds reject format here)
+        instance = await withTimeout(
+          API.create({ type:"key-points", length:"short", output:{ language: lang } }),
+          6000, "create-timeout"
+        );
+        return { ok:true, inst: instance };
+      } catch (e) {
+        instance = null;
+        return { ok:false, error: String(e && e.message ? e.message : e) };
+      } finally {
+        creating = null;
+      }
+    })();
+
+    return creating;
   }
 
-  // Respond to handshake (panel/content ping)
   window.addEventListener("message", (ev) => {
     const d = ev.data;
     if (d && d.__tabfeed === "SUMMARIZE_PING") {
@@ -58,38 +62,33 @@
     }
   });
 
-  // Main summarize handler with hard timeouts
   window.addEventListener("message", async (ev) => {
     const d = ev.data;
     if (!d || d.__tabfeed !== "SUMMARIZE_REQ") return;
 
-    try {
-      const lang = pickLang(d.lang);
-      const { ok, inst, error } = await ensureSummarizer(lang);
-      if (!ok || !inst) {
-        window.postMessage({ __tabfeed: "SUMMARIZE_RES", id: d.id, ok: false, error }, "*");
-        return;
-      }
+    const lang = pick(d.lang);
+    const text = (d.text || "").slice(0, 4000); // smaller chunk = faster/stabler
+    if (text.length < 80) {
+      window.postMessage({ __tabfeed:"SUMMARIZE_RES", id:d.id, ok:false, error:"too-short" }, "*");
+      return;
+    }
 
-      const input = (d.text || "").slice(0, 8000);
-      if (input.length < 60) {
-        window.postMessage({ __tabfeed: "SUMMARIZE_RES", id: d.id, ok: false, error: "too-short" }, "*");
+    try {
+      const { ok, inst, error } = await ensureInstance(lang);
+      if (!ok || !inst) {
+        window.postMessage({ __tabfeed:"SUMMARIZE_RES", id:d.id, ok:false, error }, "*");
         return;
       }
 
       const out = await withTimeout(
-        inst.summarize(input, { format: "markdown", output: { language: lang } }),
-        15000, // 15s summarize timeout
-        "summarize-timeout"
+        inst.summarize(text, { format:"markdown", output:{ language: lang } }),
+        10000, "summarize-timeout"
       );
 
-      const summary = typeof out === "string" ? out : (out && out.summary) || "";
-      window.postMessage({ __tabfeed: "SUMMARIZE_RES", id: d.id, ok: true, summary }, "*");
+      const summary = typeof out === "string" ? out : (out?.summary || "");
+      window.postMessage({ __tabfeed:"SUMMARIZE_RES", id:d.id, ok:true, summary }, "*");
     } catch (e) {
-      window.postMessage(
-        { __tabfeed: "SUMMARIZE_RES", id: d.id, ok: false, error: String(e && e.message ? e.message : e) },
-        "*"
-      );
+      window.postMessage({ __tabfeed:"SUMMARIZE_RES", id:d.id, ok:false, error:String(e) }, "*");
     }
   });
 })();

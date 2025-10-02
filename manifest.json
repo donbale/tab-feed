@@ -2,7 +2,7 @@
   "manifest_version": 3,
   "name": "Tab Feed (POC)",
   "version": "0.0.3",
-  "permissions": ["tabs", "tabGroups", "storage", "scripting"],
+  "permissions": ["tabs", "storage", "scripting"],
   "host_permissions": ["<all_urls>"],
   "background": { "service_worker": "background.js" },
   "action": { "default_title": "Tab Feed" },
