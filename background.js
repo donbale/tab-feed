@@ -1,4 +1,4 @@
-// background.js — TabFeed (no page-bridge; panel does summaries)
+// background.js — TabFeed (panel-only summarizer, persistent storage, inject existing tabs)
 console.log("[TabFeed] background boot", new Date().toISOString());
 
 // ---------- Constants ----------
@@ -16,9 +16,9 @@ function isOwnTab(tabOrUrl) {
 }
 
 function stableSort(a, b) {
-  if (a.pinned !== b.pinned) return a.pinned ? -1 : 1;   // pinned first
+  if (a.pinned !== b.pinned) return a.pinned ? -1 : 1;
   if (a.windowId !== b.windowId) return a.windowId - b.windowId;
-  return (a.tabIndex ?? 0) - (b.tabIndex ?? 0);          // by strip order
+  return (a.tabIndex ?? 0) - (b.tabIndex ?? 0);
 }
 
 function toItemFromTab(t, prev = {}) {
@@ -41,18 +41,30 @@ function toItemFromTab(t, prev = {}) {
   };
 }
 
-// Build canonical list from Chrome → write storage.session.tabs → notify panel
+function mergePayload(it, payload) {
+  const merged = { ...it };
+  if (payload.url) merged.url = payload.url;
+  if (payload.domain) merged.domain = payload.domain;
+  if (payload.title) merged.title = payload.title;
+  if (payload.favicon) merged.favicon = payload.favicon;
+  if (payload.heroImage) merged.heroImage = payload.heroImage;
+  if (payload.description) merged.description = payload.description;
+  if (payload.fullText && payload.fullText.length > (merged.fullText?.length || 0)) {
+    merged.fullText = payload.fullText;
+  }
+  return merged;
+}
+
 async function reconcileAndBroadcast() {
   const openTabs = await chrome.tabs.query({});
-
   const liveIds = new Set();
+
   for (const t of openTabs) {
     if (!t.id || isOwnTab(t)) continue;
     liveIds.add(t.id);
     const prev = tabsIndex.get(t.id) || {};
     tabsIndex.set(t.id, toItemFromTab(t, prev));
   }
-  // prune closed/missing
   for (const id of Array.from(tabsIndex.keys())) {
     if (!liveIds.has(id)) tabsIndex.delete(id);
   }
@@ -61,7 +73,7 @@ async function reconcileAndBroadcast() {
     .filter(it => it.url && !isOwnTab(it.url))
     .sort(stableSort);
 
-  await chrome.storage.session.set({ tabs: list });
+  await chrome.storage.local.set({ tabs: list });
   chrome.runtime.sendMessage({ type: "TABS_UPDATED" }).catch(() => {});
 }
 
@@ -74,7 +86,25 @@ async function requestParse(tabId) {
   try { await chrome.tabs.sendMessage(tabId, { type: "PARSE_NOW" }); } catch {}
 }
 
-// ---------- Robust opener (side panel with tab fallback) ----------
+// ---------- Inject content.js into all open tabs ----------
+async function injectContentIntoAllTabs() {
+  const tabs = await chrome.tabs.query({});
+  for (const t of tabs) {
+    if (!t.id || isOwnTab(t) || !t.url || t.url.startsWith("chrome://") || t.url.startsWith("chrome-extension://")) continue;
+    try {
+      await chrome.scripting.executeScript({
+        target: { tabId: t.id },
+        files: ["content.js"]
+      });
+      await chrome.tabs.sendMessage(t.id, { type: "PARSE_NOW" }).catch(() => {});
+      console.log("[TabFeed][bg] injected content.js into", t.url);
+    } catch (e) {
+      console.warn("[TabFeed][bg] failed to inject into", t.url, e);
+    }
+  }
+}
+
+// ---------- Robust opener ----------
 async function openUI(tab) {
   const url = PANEL_URL;
   try {
@@ -83,30 +113,29 @@ async function openUI(tab) {
     }
     if (chrome.sidePanel?.open) {
       await chrome.sidePanel.open({ windowId: tab?.windowId });
-      console.log("[TabFeed][bg] side panel opened");
       await reconcileAndBroadcast();
-      const tabs = await chrome.tabs.query({});
-      for (const t of tabs) if (t.id && !isOwnTab(t)) requestParse(t.id);
+      await injectContentIntoAllTabs(); // also parse existing
       return;
     }
     throw new Error("sidePanel API unavailable");
-  } catch (e) {
-    console.warn("[TabFeed][bg] side panel open failed, falling back to tab:", e?.message || e);
+  } catch {
     await chrome.tabs.create({ url }).catch(() => {});
     await reconcileAndBroadcast();
-    const tabs = await chrome.tabs.query({});
-    for (const t of tabs) if (t.id && !isOwnTab(t)) requestParse(t.id);
+    await injectContentIntoAllTabs();
   }
 }
 chrome.action.onClicked.addListener(openUI);
 
+// ---------- Startup/install ----------
 chrome.runtime.onInstalled.addListener(async () => {
   try { await chrome.sidePanel?.setOptions?.({ path: "panel.html", enabled: true }); } catch {}
   await reconcileAndBroadcast();
+  await injectContentIntoAllTabs();
 });
 chrome.runtime.onStartup.addListener(async () => {
   try { await chrome.sidePanel?.setOptions?.({ path: "panel.html", enabled: true }); } catch {}
   await reconcileAndBroadcast();
+  await injectContentIntoAllTabs();
 });
 
 // ---------- Tab lifecycle ----------
@@ -146,13 +175,12 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     try {
       if (msg?.type === "PANEL_OPENED") {
         await reconcileAndBroadcast();
-        const tabs = await chrome.tabs.query({});
-        for (const t of tabs) if (t.id && !isOwnTab(t)) requestParse(t.id);
+        await injectContentIntoAllTabs();
         sendResponse?.({ ok: true }); return;
       }
 
       if (msg?.type === "GET_TABS_NOW") {
-        const { tabs = [] } = await chrome.storage.session.get("tabs");
+        const { tabs = [] } = await chrome.storage.local.get("tabs");
         sendResponse?.({ ok: true, tabs }); return;
       }
 
@@ -160,16 +188,8 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         const t = sender.tab;
         if (isOwnTab(t)) { sendResponse?.({ ok: true }); return; }
         const prev = tabsIndex.get(t.id) || {};
-        tabsIndex.set(t.id, {
-          ...toItemFromTab(t, prev),
-          url: msg.payload?.url || t.url || prev.url || "",
-          domain: msg.payload?.domain || prev.domain || "",
-          title: msg.payload?.title || t.title || prev.title || "(no title)",
-          favicon: msg.payload?.favicon || t.favIconUrl || prev.favicon || "",
-          heroImage: msg.payload?.heroImage || prev.heroImage || "",
-          description: msg.payload?.description || prev.description || "",
-          fullText: msg.payload?.fullText || prev.fullText || "",
-        });
+        const merged = mergePayload(toItemFromTab(t, prev), msg.payload || {});
+        tabsIndex.set(t.id, merged);
         scheduleBroadcast();
         sendResponse?.({ ok: true }); return;
       }
@@ -210,7 +230,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   };
 
   run();
-  return false; // no long-running async ports needed
+  return false;
 });
 
 console.log("[TabFeed] background ready");

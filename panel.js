@@ -1,4 +1,4 @@
-// panel.js — UI + Summarizer API (runs only here; content just extracts)
+// panel.js — UI + Summarizer API (panel-only), reads from chrome.storage.local
 
 const grid = document.getElementById("grid");
 const counts = document.getElementById("counts");
@@ -71,7 +71,6 @@ async function runQueue() {
     const it = summaryQueue.shift();
     const md = await summarizeMD(it.fullText);
     if (md) {
-      // send to background (will update storage + broadcast)
       chrome.runtime.sendMessage({
         type: "TAB_SUMMARY_FROM_PANEL",
         tabId: it.tabId,
@@ -120,8 +119,7 @@ function render(items) {
       sum.textContent = mdToText(it.summary);
     } else if (it.fullText && it.fullText.length >= 120) {
       sum.textContent = "Generating TL;DR…";
-      // queue for summarization (only here in panel)
-      summaryQueue.push(it);
+      summaryQueue.push(it); // let panel summarize
     } else if (it.fullText) {
       sum.textContent = "Not enough text yet…";
     } else {
@@ -165,21 +163,36 @@ function render(items) {
     card.appendChild(actions);
     grid.appendChild(card);
   }
-
-  // kick the queue after drawing
-  runQueue();
+  runQueue(); // kick after drawing
 }
 
 // ---------- hydrate ----------
+async function fetchTabsFromSW() {
+  return new Promise((resolve) => {
+    chrome.runtime.sendMessage({ type: "GET_TABS_NOW" }, (res) => {
+      if (res && res.ok && Array.isArray(res.tabs)) resolve(res.tabs);
+      else resolve(null);
+    });
+  });
+}
+
 async function hydrate() {
-  const { tabs = [] } = await chrome.storage.session.get("tabs");
+  // Prefer SW snapshot
+  const fromSW = await fetchTabsFromSW();
+  if (fromSW) {
+    render(fromSW);
+    return;
+  }
+  // Fallback: read from persistent storage
+  const { tabs = [] } = await chrome.storage.local.get("tabs");
   render(Array.isArray(tabs) ? tabs : []);
 }
 
+// Live updates
 chrome.runtime.onMessage.addListener((msg) => {
   if (msg?.type === "TABS_UPDATED") hydrate();
 });
 
-// inform SW we opened; also ask once for current list
+// On open: tell SW and hydrate
 chrome.runtime.sendMessage({ type: "PANEL_OPENED" }).catch(() => {});
 hydrate();
