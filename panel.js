@@ -1,9 +1,28 @@
-// panel.js — UI + Summarizer API (panel-only), reads from chrome.storage.local
+// panel.js — UI + Summarizer API (runs only here; content just extracts)
 
 const grid = document.getElementById("grid");
 const counts = document.getElementById("counts");
 
 // ---------- utils ----------
+// ---------- related Google search ----------
+function buildRelatedQuery(it) {
+  const parts = [];
+  if (it?.title) parts.push(it.title);
+  if (it?.summary) {
+    const text = mdToText(it.summary).replace(/\s+/g, " ").trim();
+    parts.push(text.split(" ").slice(0, 12).join(" "));
+  }
+  if (it?.domain) parts.push(`site:${it.domain}`);
+  const seen = new Set();
+  const uniq = [];
+  for (const p of parts) {
+    const t = (p || "").trim();
+    if (t && !seen.has(t)) { seen.add(t); uniq.push(t); }
+  }
+  const q = uniq.join(" ");
+  return `https://www.google.com/search?q=${encodeURIComponent(q)}`;
+}
+
 function timeAgo(ts) {
   if (!ts) return "";
   const s = Math.floor((Date.now() - ts) / 1000);
@@ -71,6 +90,7 @@ async function runQueue() {
     const it = summaryQueue.shift();
     const md = await summarizeMD(it.fullText);
     if (md) {
+      // send to background (will update storage + broadcast)
       chrome.runtime.sendMessage({
         type: "TAB_SUMMARY_FROM_PANEL",
         tabId: it.tabId,
@@ -119,13 +139,28 @@ function render(items) {
       sum.textContent = mdToText(it.summary);
     } else if (it.fullText && it.fullText.length >= 120) {
       sum.textContent = "Generating TL;DR…";
-      summaryQueue.push(it); // let panel summarize
+      // queue for summarization (only here in panel)
+      summaryQueue.push(it);
     } else if (it.fullText) {
       sum.textContent = "Not enough text yet…";
     } else {
       sum.textContent = "No article text extracted yet.";
     }
     card.appendChild(sum);
+
+    const actionsEl = document.createElement("div");
+    actionsEl.className = "card-actions";
+    const btnRel = document.createElement("button");
+    btnRel.className = "btn tertiary";
+    btnRel.textContent = "Related Google Search";
+    btnRel.addEventListener("click", (ev) => {
+      ev.stopPropagation();
+      const url = buildRelatedQuery(it);
+      chrome.tabs.create({ url });
+    });
+    actionsEl.appendChild(btnRel);
+    card.appendChild(actionsEl);
+            
 
     const actions = document.createElement("div");
     actions.className = "actions";
@@ -163,36 +198,21 @@ function render(items) {
     card.appendChild(actions);
     grid.appendChild(card);
   }
-  runQueue(); // kick after drawing
+
+  // kick the queue after drawing
+  runQueue();
 }
 
 // ---------- hydrate ----------
-async function fetchTabsFromSW() {
-  return new Promise((resolve) => {
-    chrome.runtime.sendMessage({ type: "GET_TABS_NOW" }, (res) => {
-      if (res && res.ok && Array.isArray(res.tabs)) resolve(res.tabs);
-      else resolve(null);
-    });
-  });
-}
-
 async function hydrate() {
-  // Prefer SW snapshot
-  const fromSW = await fetchTabsFromSW();
-  if (fromSW) {
-    render(fromSW);
-    return;
-  }
-  // Fallback: read from persistent storage
-  const { tabs = [] } = await chrome.storage.local.get("tabs");
+  const { tabs = [] } = await chrome.storage.session.get("tabs");
   render(Array.isArray(tabs) ? tabs : []);
 }
 
-// Live updates
 chrome.runtime.onMessage.addListener((msg) => {
   if (msg?.type === "TABS_UPDATED") hydrate();
 });
 
-// On open: tell SW and hydrate
+// inform SW we opened; also ask once for current list
 chrome.runtime.sendMessage({ type: "PANEL_OPENED" }).catch(() => {});
 hydrate();
