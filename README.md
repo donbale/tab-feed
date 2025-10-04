@@ -86,3 +86,8 @@ If no language is passed, summarization requests may fail with an error.
   * `caps: available` → Summarizer API is exposed.
   * `summary:` → Summary result received.
   * `[TL;DR error: ...]` → Something failed; check the error reason.
+
+
+## Search Tab
+
+A new search tab is added to each tile which enables the user to further google search on the topics summarized in the tile with a single click.
