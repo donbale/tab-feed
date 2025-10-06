@@ -1,11 +1,11 @@
-// panel.js — Dynamic Front Page + Summarizer + Prompt classification
+// panel.js — Front Page + Summarizer + Prompt classification + Entities + Reading-time badges
 
 const counts = document.getElementById("counts");
 const elHero  = document.getElementById("region-hero");
 const elLeads = document.getElementById("region-leads");
 const elMain  = document.getElementById("region-main");
 const elRail  = document.getElementById("region-rail");
-const listGrid= document.getElementById("grid"); // fallback holder (kept hidden)
+const listGrid= document.getElementById("grid"); // optional / hidden
 const nav     = document.getElementById("filters");
 
 // ---------- utils ----------
@@ -29,12 +29,15 @@ function mdToText(md = "") {
     .trim();
 }
 function score(it) {
-  // recency + summary + pinned
   const recencyMin = (Date.now() - (it.updatedAt || 0)) / 60000;
   let s = 1000 - Math.min(recencyMin, 1000);
   if (it.summary && it.summary.length) s += 200;
   if (it.pinned) s += 150;
   return s;
+}
+function estimateReadingMinutes(text = "") {
+  const words = (text.match(/\b\w+\b/g) || []).length;
+  return Math.max(1, Math.round(words / 220)); // ~220 wpm
 }
 
 // ---------- Summarizer ----------
@@ -68,22 +71,24 @@ async function summarizeMD(text) {
   } catch { return null; }
 }
 
-// ---------- Prompt API classification ----------
+// ---------- Prompt API (LanguageModel) ----------
 async function getLM() {
   try {
     const LM = globalThis.LanguageModel || (globalThis.ai && globalThis.ai.languageModel);
     if (!LM) return null;
     const session = await LM.create?.({
-      expectedInputs: [{ type: "text", languages: ["en"] }],
+      expectedInputs:  [{ type: "text", languages: ["en"] }],
       expectedOutputs: [{ type: "text", languages: ["en"] }]
     });
     return session || null;
   } catch { return null; }
 }
+
 const CATEGORY_ENUM = [
   "News","Technology","Developer Docs","Research","Video","Social",
   "Shopping","Entertainment","Finance","Sports","Productivity","Other"
 ];
+
 async function classifyTabContent(fullText, url, title, description) {
   const lm = await getLM();
   if (!lm) return null;
@@ -93,13 +98,13 @@ async function classifyTabContent(fullText, url, title, description) {
   const systemPrompt = `You are a browser tab classifier.
 Choose up to 3 categories from: ${CATEGORY_ENUM.join(", ")}.
 Return ONLY a JSON array of strings, e.g. ["News","Technology"].`;
-  const userPrompt = `Domain: ${domain}\nTitle: ${title || ""}\nDescription: ${description || ""}\nText: """${text}"""`;
+  const userPrompt = `Domain: ${domain}
+Title: ${title || ""}
+Description: ${description || ""}
+Text: """${text}"""`;
 
   try {
-    const res = await lm.prompt([
-      { role: "system", content: systemPrompt },
-      { role: "user", content: userPrompt }
-    ]);
+    const res = await lm.prompt([{ role: "system", content: systemPrompt }, { role: "user", content: userPrompt }]);
     let parsed; try { parsed = JSON.parse(res); } catch {}
     if (!Array.isArray(parsed)) parsed = ["Other"];
     const clean = parsed.map(s => String(s).trim()).filter(s => CATEGORY_ENUM.includes(s)).slice(0,3);
@@ -110,7 +115,35 @@ Return ONLY a JSON array of strings, e.g. ["News","Technology"].`;
   }
 }
 
+// ---------- Entities (Prompt API) ----------
+async function extractEntities(fullText, url, title, description) {
+  const lm = await getLM();
+  if (!lm) return null;
+
+  const snippet = (fullText || description || title || "").slice(0, 1200);
+  const system = `Extract named entities from a news/article snippet.
+Return STRICT JSON: {"people":[...], "orgs":[...], "places":[...]}
+- Each list: 0-6 short strings
+- No commentary. JSON only.`;
+  const user = `Title: ${title || ""}
+URL: ${url || ""}
+Text: """${snippet}"""`;
+
+  try {
+    const out = await lm.prompt([{ role: "system", content: system }, { role: "user", content: user }]);
+    let obj; try { obj = JSON.parse(out); } catch {}
+    if (!obj) return null;
+    const norm = (arr) => (Array.isArray(arr) ? arr.map(s => String(s).trim()).filter(Boolean).slice(0,6) : []);
+    return { people: norm(obj.people), orgs: norm(obj.orgs), places: norm(obj.places) };
+  } catch (e) {
+    console.warn("[TabFeed][panel] entities failed:", e);
+    return null;
+  }
+}
+
 // ---------- queues ----------
+const lastSummarizedSig = new Map(); // tabId -> sig
+
 let summaryQueue = [];
 let summaryRunning = false;
 async function runSummaryQueue() {
@@ -120,11 +153,7 @@ async function runSummaryQueue() {
     const it = summaryQueue.shift();
     const md = await summarizeMD(it.fullText);
     if (md) {
-      chrome.runtime.sendMessage({
-        type: "TAB_SUMMARY_FROM_PANEL",
-        tabId: it.tabId,
-        summary: md
-      }).catch(() => {});
+      chrome.runtime.sendMessage({ type: "TAB_SUMMARY_FROM_PANEL", tabId: it.tabId, summary: md }).catch(() => {});
     }
   }
   summaryRunning = false;
@@ -138,79 +167,121 @@ async function runClassifyQueue() {
   while (classifyQueue.length) {
     const it = classifyQueue.shift();
     if (!(it.fullText && it.fullText.length >= 120)) continue;
-    if (Array.isArray(it.categories) && it.categories.length) continue; // already have
+    if (Array.isArray(it.categories) && it.categories.length) continue;
     const result = await classifyTabContent(it.fullText, it.url, it.title, it.description);
     if (result && result.categories) {
-      chrome.runtime.sendMessage({
-        type: "TAB_CLASSIFICATION_FROM_PANEL",
-        tabId: it.tabId,
-        categories: result.categories
-      }).catch(() => {});
+      chrome.runtime.sendMessage({ type: "TAB_CLASSIFICATION_FROM_PANEL", tabId: it.tabId, categories: result.categories }).catch(() => {});
     }
   }
   classifyRunning = false;
 }
 
+let entitiesQueue = [];
+let entitiesRunning = false;
+async function runEntitiesQueue() {
+  if (entitiesRunning) return;
+  entitiesRunning = true;
+  while (entitiesQueue.length) {
+    const it = entitiesQueue.shift();
+    if (!(it.fullText && it.fullText.length >= 120)) continue;
+    if (it.entities && (it.entities.people?.length || it.entities.orgs?.length || it.entities.places?.length)) continue;
+    const ents = await extractEntities(it.fullText, it.url, it.title, it.description);
+    if (ents) {
+      chrome.runtime.sendMessage({ type: "TAB_ENTITIES_FROM_PANEL", tabId: it.tabId, entities: ents }).catch(() => {});
+    }
+  }
+  entitiesRunning = false;
+}
+
 // ---------- category filter ----------
 let activeFilter = null;
 function renderFilters(items) {
-  // Build category counts from current items
   const countsMap = new Map();
   for (const it of items) {
     const cats = Array.isArray(it.categories) ? it.categories : [];
     for (const c of cats) countsMap.set(c, (countsMap.get(c) || 0) + 1);
   }
   nav.innerHTML = "";
-  if (!countsMap.size) return; // hide until we have at least one category
+  if (!countsMap.size) return;
 
   const makeBtn = (label, on, handler) => {
     const b = document.createElement("button");
-    b.textContent = label;
-    if (on) b.classList.add("active");
-    b.onclick = handler;
-    return b;
+    b.textContent = label; if (on) b.classList.add("active"); b.onclick = handler; return b;
   };
   nav.appendChild(makeBtn(activeFilter ? "All" : "All ✓", !activeFilter, () => { activeFilter = null; hydrate(); }));
+
   const preferredOrder = CATEGORY_ENUM.filter(c => countsMap.has(c));
   for (const c of preferredOrder) {
-    nav.appendChild(
-      makeBtn(activeFilter === c ? `${c} ✓` : c, activeFilter === c, () => { activeFilter = (activeFilter === c ? null : c); hydrate(); })
-    );
+    nav.appendChild(makeBtn(activeFilter === c ? `${c} ✓` : c, activeFilter === c,
+      () => { activeFilter = (activeFilter === c ? null : c); hydrate(); }));
   }
+}
+
+// ---------- UI helpers ----------
+function chipBar(cats=[]) {
+  if (!cats.length) return null;
+  const wrap = document.createElement("div");
+  wrap.className = "chips";
+  for (const c of cats) { const x = document.createElement("span"); x.className = "chip"; x.textContent = c; wrap.appendChild(x); }
+  return wrap;
+}
+function entitiesBar(entities) {
+  const { people=[], orgs=[], places=[] } = entities || {};
+  if (![...people, ...orgs, ...places].length) return null;
+  const wrap = document.createElement("div");
+  wrap.className = "chips";
+  const add = (label) => { const s = document.createElement("span"); s.className="chip"; s.textContent=label; wrap.appendChild(s); };
+  people.forEach(p => add(p));
+  orgs.forEach(o => add(o));
+  places.forEach(pl => add(pl));
+  return wrap;
+}
+function badgesRow(it) {
+  const row = document.createElement("div");
+  row.className = "chips";
+  // Estimated reading time
+  const rt = document.createElement("span");
+  rt.className = "chip";
+  const minutes = (typeof it.readingMinutes === "number")
+    ? it.readingMinutes
+    : (it.fullText ? estimateReadingMinutes(it.fullText) : null);
+  if (minutes != null) rt.textContent = `~${minutes} min`; else rt.textContent = "~— min";
+  row.appendChild(rt);
+
+  // Tab age (since firstSeen)
+  const age = document.createElement("span");
+  age.className = "chip";
+  const first = it.firstSeen || it.updatedAt || Date.now();
+  age.textContent = `opened ${timeAgo(first)}`;
+  row.appendChild(age);
+
+  // if we computed locally but not saved yet, persist
+  if (it.tabId && it.fullText && it.readingMinutes == null && minutes != null) {
+    chrome.runtime.sendMessage({ type: "TAB_READINGTIME_FROM_PANEL", tabId: it.tabId, minutes }).catch(()=>{});
+  }
+
+  return row;
 }
 
 // ---------- card builders ----------
 function actionsBar(it) {
   const actions = document.createElement("div");
   actions.className = "actions";
-  const btn = (txt, handler) => {
-    const b = document.createElement("button");
-    b.textContent = txt;
-    b.onclick = (e) => { e.stopPropagation(); handler(); };
-    return b;
-  };
+  const btn = (txt, handler) => { const b = document.createElement("button"); b.textContent = txt; b.onclick = (e)=>{ e.stopPropagation(); handler(); }; return b; };
   const link = document.createElement("a");
-  link.href = it.url; link.target = "_blank"; link.rel = "noreferrer"; link.textContent = "Open link";
-  link.onclick = (e) => e.stopPropagation();
+  link.href = it.url; link.target = "_blank"; link.rel = "noreferrer"; link.textContent = "Open link"; link.onclick = (e)=> e.stopPropagation();
 
   actions.appendChild(btn("Focus", () => chrome.runtime.sendMessage({ type: "FOCUS_TAB", tabId: it.tabId, windowId: it.windowId })));
   actions.appendChild(btn(it.pinned ? "Unpin" : "Pin", () => chrome.runtime.sendMessage({ type: "PIN_TOGGLE", tabId: it.tabId })));
   actions.appendChild(btn("Close", () => chrome.runtime.sendMessage({ type: "CLOSE_TAB", tabId: it.tabId })));
   actions.appendChild(link);
+
   return actions;
 }
-function chipBar(cats=[]) {
-  if (!cats.length) return null;
-  const wrap = document.createElement("div");
-  wrap.className = "chips";
-  for (const c of cats) {
-    const x = document.createElement("span");
-    x.className = "chip"; x.textContent = c; wrap.appendChild(x);
-  }
-  return wrap;
-}
+
 function card(it, { variant="standard" } = {}) {
   const el = document.createElement("article");
+  el.dataset.tab = it.tabId;
   el.className = "card" + (variant==="hero" ? " hero" : "");
   el.onclick = () => chrome.runtime.sendMessage({ type: "FOCUS_TAB", tabId: it.tabId, windowId: it.windowId });
 
@@ -229,32 +300,63 @@ function card(it, { variant="standard" } = {}) {
   meta.textContent = `${it.domain || ""} • ${timeAgo(it.updatedAt)}`;
   el.appendChild(meta);
 
-  const cats = Array.isArray(it.categories) ? it.categories : [];
-  const chips = chipBar(cats);
-  if (chips) el.appendChild(chips);
+  const cats = chipBar(it.categories || []);
+  if (cats) el.appendChild(cats);
 
+  // Badges: reading time + tab age
+  el.appendChild(badgesRow(it));
+
+  // Entities chips (if we have them)
+  const ents = entitiesBar(it.entities);
+  if (ents) el.appendChild(ents);
+
+  // Summary (with content-signature requeue)
   const sum = document.createElement("div");
   sum.className = "summary";
-  if (it.summary) sum.textContent = mdToText(it.summary);
-  else if (it.fullText && it.fullText.length >= 120) { sum.textContent = "Generating TL;DR…"; summaryQueue.push(it); }
-  else if (it.fullText) sum.textContent = "Not enough text yet…";
-  else sum.textContent = "No article text extracted yet.";
+  const sig = [(it.url || ""), (it.title || ""), (it.fullText ? it.fullText.length : 0)].join("|");
+  const prevSig = lastSummarizedSig.get(it.tabId);
+
+  if (prevSig && prevSig !== sig) {
+    // background should have invalidated summary; show pending
+  }
+
+  if (it.summary) {
+    sum.textContent = mdToText(it.summary);
+    lastSummarizedSig.set(it.tabId, sig);
+  } else if (it.fullText && it.fullText.length >= 120) {
+    sum.textContent = "Generating TL;DR…";
+    if (prevSig !== sig) {
+      summaryQueue.push(it);
+      lastSummarizedSig.set(it.tabId, sig);
+    }
+  } else if (it.fullText) {
+    sum.textContent = "Not enough text yet…";
+  } else {
+    sum.textContent = "No article text extracted yet.";
+  }
   el.appendChild(sum);
 
   el.appendChild(actionsBar(it));
+
+  // Queue AI jobs if needed
+  if ((!Array.isArray(it.categories) || it.categories.length === 0) &&
+      it.fullText && it.fullText.length >= 120) {
+    classifyQueue.push(it);
+  }
+  if (it.fullText && it.fullText.length >= 120 &&
+      !(it.entities && (it.entities.people?.length || it.entities.orgs?.length || it.entities.places?.length))) {
+    entitiesQueue.push(it);
+  }
+
   return el;
 }
 
 // ---------- front-page render ----------
 function renderFront(items) {
-  // Apply active category if any
   const source = activeFilter ? items.filter(it => (it.categories || []).includes(activeFilter)) : items;
   counts.textContent = `${source.length} open tab${source.length === 1 ? "" : "s"}`;
 
-  // Sort by prominence
   const sorted = [...source].sort((a,b) => score(b)-score(a));
-
-  // Regions
   const hero = sorted.find(x => x.heroImage || x.summary) || sorted[0];
   const rest = sorted.filter(x => x !== hero);
   const leads = rest.slice(0, 3);
@@ -268,31 +370,19 @@ function renderFront(items) {
   for (const it of main)  elMain.appendChild(card(it));
   for (const it of rail)  elRail.appendChild(card(it));
 
-  // Queue jobs
-  // Aggressively classify anything with text but no categories yet
-  for (const it of source) {
-    if ((!Array.isArray(it.categories) || it.categories.length === 0) &&
-        it.fullText && it.fullText.length >= 120) {
-      classifyQueue.push(it);
-    }
-    if (it.fullText && it.fullText.length >= 120 && !it.summary) {
-      summaryQueue.push(it);
-    }
-  }
   runClassifyQueue();
+  runEntitiesQueue();
   runSummaryQueue();
 }
 
-// ---------- hydrate ----------
+// ---------- hydrate & filters ----------
 function render(items) {
-  // filters appear once any category exists
   const anyCats = items.some(it => Array.isArray(it.categories) && it.categories.length);
   nav.innerHTML = ""; if (anyCats) renderFilters(items);
-
-  // always use front-page layout
-  listGrid.hidden = true;
+  if (listGrid) listGrid.hidden = true;
   renderFront(items);
 }
+
 async function fetchTabsFromSW() {
   return new Promise((resolve) => {
     chrome.runtime.sendMessage({ type: "GET_TABS_NOW" }, (res) => {
@@ -308,14 +398,13 @@ async function hydrate() {
   render(Array.isArray(tabs) ? tabs : []);
 }
 
-// live updates
 chrome.runtime.onMessage.addListener((msg) => {
   if (msg?.type === "TABS_UPDATED") hydrate();
 });
 chrome.runtime.sendMessage({ type: "PANEL_OPENED" }).catch(() => {});
 hydrate();
 
-// ---------- Optional: “Classify all” button support ----------
+// Optional: “Classify all” if you added #classifyAll in HTML
 document.getElementById("classifyAll")?.addEventListener("click", async (e) => {
   e.stopPropagation();
   const { tabs = [] } = await chrome.storage.local.get("tabs");

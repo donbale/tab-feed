@@ -115,7 +115,8 @@ async function hydrateFromStorage() {
 async function injectContentIntoAllTabs() {
   const tabs = await chrome.tabs.query({});
   for (const t of tabs) {
-    if (!t.id || isOwnTab(t) || !t.url || t.url.startsWith("chrome://") || t.url.startsWith("chrome-extension://")) continue;
+    if (!t.id || isOwnTab(t) || !t.url) continue;
+    if (t.url.startsWith("chrome://") || t.url.startsWith("edge://") || t.url.startsWith("chrome-extension://")) continue;
     try {
       await chrome.scripting.executeScript({
         target: { tabId: t.id },
@@ -172,10 +173,15 @@ chrome.tabs.onCreated.addListener(async (t) => {
   requestParse(t.id);
 });
 
+// Re-parse on URL change OR when load completes
 chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
   if (!tabId || !tab || isOwnTab(tab)) return;
   tabsIndex.set(tabId, toItemFromTab(tab, tabsIndex.get(tabId) || {}));
   scheduleBroadcast();
+
+  // If the URL changed (SPA sometimes updates url without "complete")
+  if (changeInfo.url) requestParse(tabId);
+
   if (changeInfo.status === "complete") requestParse(tabId);
 });
 
@@ -193,6 +199,19 @@ chrome.tabs.onMoved.addListener((tabId, moveInfo) => {
 chrome.tabs.onRemoved.addListener((tabId) => {
   if (tabsIndex.has(tabId)) tabsIndex.delete(tabId);
   scheduleBroadcast();
+});
+
+// ---------- ALSO catch SPA navigations ----------
+chrome.webNavigation?.onHistoryStateUpdated?.addListener((details) => {
+  // pushState/replaceState navigations (same document)
+  if (details.frameId !== 0) return; // main frame only
+  requestParse(details.tabId);
+});
+
+chrome.webNavigation?.onCommitted?.addListener((details) => {
+  // new document commits
+  if (details.frameId !== 0) return;
+  requestParse(details.tabId);
 });
 
 // ---------- Messages ----------
