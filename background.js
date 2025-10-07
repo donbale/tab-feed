@@ -1,4 +1,4 @@
-// background.js — TabFeed (panel-only summarizer, persistent storage, inject existing tabs)
+// background.js — TabFeed (panel-only AI, persistent storage, stable updates)
 console.log("[TabFeed] background boot", new Date().toISOString());
 
 // ---------- Constants ----------
@@ -35,12 +35,14 @@ function toItemFromTab(t, prev = {}) {
     description: prev.description || "",
     fullText: prev.fullText || "",
     summary: prev.summary || "",
+    categories: prev.categories || [],
     pinned: !!t.pinned,
     audible: !!t.audible,
     updatedAt: Date.now()
   };
 }
 
+// Only overwrite fields if incoming payload has real content
 function mergePayload(it, payload) {
   const merged = { ...it };
   if (payload.url) merged.url = payload.url;
@@ -52,7 +54,19 @@ function mergePayload(it, payload) {
   if (payload.fullText && payload.fullText.length > (merged.fullText?.length || 0)) {
     merged.fullText = payload.fullText;
   }
+  if (Array.isArray(payload.categories) && payload.categories.length) {
+    merged.categories = payload.categories;
+  }
   return merged;
+}
+
+async function saveAndBroadcast() {
+  const list = [...tabsIndex.values()]
+    .filter(it => it.url && !isOwnTab(it.url))
+    .sort(stableSort);
+
+  await chrome.storage.local.set({ tabs: list });
+  chrome.runtime.sendMessage({ type: "TABS_UPDATED" }).catch(() => {});
 }
 
 async function reconcileAndBroadcast() {
@@ -65,16 +79,12 @@ async function reconcileAndBroadcast() {
     const prev = tabsIndex.get(t.id) || {};
     tabsIndex.set(t.id, toItemFromTab(t, prev));
   }
+  // prune closed
   for (const id of Array.from(tabsIndex.keys())) {
     if (!liveIds.has(id)) tabsIndex.delete(id);
   }
 
-  const list = [...tabsIndex.values()]
-    .filter(it => it.url && !isOwnTab(it.url))
-    .sort(stableSort);
-
-  await chrome.storage.local.set({ tabs: list });
-  chrome.runtime.sendMessage({ type: "TABS_UPDATED" }).catch(() => {});
+  await saveAndBroadcast();
 }
 
 function scheduleBroadcast() {
@@ -86,20 +96,35 @@ async function requestParse(tabId) {
   try { await chrome.tabs.sendMessage(tabId, { type: "PARSE_NOW" }); } catch {}
 }
 
-// ---------- Inject content.js into all open tabs ----------
+// ---------- Hydrate from storage.local at boot ----------
+async function hydrateFromStorage() {
+  try {
+    const { tabs = [] } = await chrome.storage.local.get("tabs");
+    if (Array.isArray(tabs)) {
+      for (const it of tabs) {
+        if (it.tabId != null) tabsIndex.set(it.tabId, it);
+      }
+      console.log("[TabFeed][bg] hydrated from storage:", tabs.length, "items");
+    }
+  } catch (e) {
+    console.warn("[TabFeed][bg] hydrateFromStorage failed:", e);
+  }
+}
+
+// ---------- Inject content.js into all open tabs (so old tabs get text) ----------
 async function injectContentIntoAllTabs() {
   const tabs = await chrome.tabs.query({});
   for (const t of tabs) {
-    if (!t.id || isOwnTab(t) || !t.url || t.url.startsWith("chrome://") || t.url.startsWith("chrome-extension://")) continue;
+    if (!t.id || isOwnTab(t) || !t.url) continue;
+    if (t.url.startsWith("chrome://") || t.url.startsWith("edge://") || t.url.startsWith("chrome-extension://")) continue;
     try {
       await chrome.scripting.executeScript({
         target: { tabId: t.id },
         files: ["content.js"]
       });
       await chrome.tabs.sendMessage(t.id, { type: "PARSE_NOW" }).catch(() => {});
-      console.log("[TabFeed][bg] injected content.js into", t.url);
-    } catch (e) {
-      console.warn("[TabFeed][bg] failed to inject into", t.url, e);
+    } catch {
+      // some pages cannot be injected — ignore
     }
   }
 }
@@ -114,7 +139,7 @@ async function openUI(tab) {
     if (chrome.sidePanel?.open) {
       await chrome.sidePanel.open({ windowId: tab?.windowId });
       await reconcileAndBroadcast();
-      await injectContentIntoAllTabs(); // also parse existing
+      await injectContentIntoAllTabs();
       return;
     }
     throw new Error("sidePanel API unavailable");
@@ -129,11 +154,13 @@ chrome.action.onClicked.addListener(openUI);
 // ---------- Startup/install ----------
 chrome.runtime.onInstalled.addListener(async () => {
   try { await chrome.sidePanel?.setOptions?.({ path: "panel.html", enabled: true }); } catch {}
+  await hydrateFromStorage();
   await reconcileAndBroadcast();
   await injectContentIntoAllTabs();
 });
 chrome.runtime.onStartup.addListener(async () => {
   try { await chrome.sidePanel?.setOptions?.({ path: "panel.html", enabled: true }); } catch {}
+  await hydrateFromStorage();
   await reconcileAndBroadcast();
   await injectContentIntoAllTabs();
 });
@@ -146,10 +173,15 @@ chrome.tabs.onCreated.addListener(async (t) => {
   requestParse(t.id);
 });
 
+// Re-parse on URL change OR when load completes
 chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
   if (!tabId || !tab || isOwnTab(tab)) return;
   tabsIndex.set(tabId, toItemFromTab(tab, tabsIndex.get(tabId) || {}));
   scheduleBroadcast();
+
+  // If the URL changed (SPA sometimes updates url without "complete")
+  if (changeInfo.url) requestParse(tabId);
+
   if (changeInfo.status === "complete") requestParse(tabId);
 });
 
@@ -165,8 +197,21 @@ chrome.tabs.onMoved.addListener((tabId, moveInfo) => {
 });
 
 chrome.tabs.onRemoved.addListener((tabId) => {
-  tabsIndex.delete(tabId);
+  if (tabsIndex.has(tabId)) tabsIndex.delete(tabId);
   scheduleBroadcast();
+});
+
+// ---------- ALSO catch SPA navigations ----------
+chrome.webNavigation?.onHistoryStateUpdated?.addListener((details) => {
+  // pushState/replaceState navigations (same document)
+  if (details.frameId !== 0) return; // main frame only
+  requestParse(details.tabId);
+});
+
+chrome.webNavigation?.onCommitted?.addListener((details) => {
+  // new document commits
+  if (details.frameId !== 0) return;
+  requestParse(details.tabId);
 });
 
 // ---------- Messages ----------
@@ -174,6 +219,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   const run = async () => {
     try {
       if (msg?.type === "PANEL_OPENED") {
+        await hydrateFromStorage();                 // if SW just woke up
         await reconcileAndBroadcast();
         await injectContentIntoAllTabs();
         sendResponse?.({ ok: true }); return;
@@ -206,15 +252,35 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         sendResponse?.({ ok: true }); return;
       }
 
+      if (msg?.type === "TAB_CLASSIFICATION_FROM_PANEL") {
+        const { tabId, categories = [] } = msg;
+        const it = tabsIndex.get(tabId);
+        if (it) {
+          it.categories = Array.isArray(categories) ? categories : [];
+          it.updatedAt = Date.now();
+          tabsIndex.set(tabId, it);
+          scheduleBroadcast();
+        }
+        sendResponse?.({ ok: true }); return;
+      }
+
+      // ---- panel commands ----
       if (msg?.type === "FOCUS_TAB") {
         await chrome.tabs.update(msg.tabId, { active: true });
         await chrome.windows.update(msg.windowId, { focused: true });
         sendResponse?.({ ok: true }); return;
       }
+
       if (msg?.type === "CLOSE_TAB") {
-        await chrome.tabs.remove(msg.tabId);
+        try {
+          await chrome.tabs.remove(msg.tabId);
+        } finally {
+          if (tabsIndex.has(msg.tabId)) tabsIndex.delete(msg.tabId);
+          await saveAndBroadcast();
+        }
         sendResponse?.({ ok: true }); return;
       }
+
       if (msg?.type === "PIN_TOGGLE") {
         const t = await chrome.tabs.get(msg.tabId);
         await chrome.tabs.update(msg.tabId, { pinned: !t.pinned });
@@ -232,5 +298,13 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   run();
   return false;
 });
+
+// ---------- Kick startup work (NO top-level await) ----------
+async function init() {
+  await hydrateFromStorage();
+  await reconcileAndBroadcast();
+  await injectContentIntoAllTabs();
+}
+init();
 
 console.log("[TabFeed] background ready");
