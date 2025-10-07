@@ -30,6 +30,14 @@ a { color:var(--accent); text-decoration:none; margin-left:auto; }
 .card button, .card a {
   cursor: default;
 }
+#filters { display:flex; gap:.5rem; margin:.5rem 0 1rem; flex-wrap:wrap; }
+#filters button { padding:.25rem .5rem; border:1px solid #333; border-radius:999px; background:#1f2937; cursor:pointer; }
+.chips { display:flex; gap:.375rem; margin-top:.5rem; flex-wrap:wrap; }
+.chip { font-size:12px; padding:.125rem .5rem; border-radius:999px; background:#243244; border:1px solid #324357; }
+.chip.pending { opacity:.7; font-style:italic; }
+.actions { display:flex; gap:.5rem; align-items:center; margin-top:.75rem; }
+.actions a, .actions button { cursor:pointer; }
+.thumb.expanded { max-height:none; height:auto; }
 .btn {
   background: var(--accent);
   color: #0b0e14;

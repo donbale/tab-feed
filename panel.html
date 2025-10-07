@@ -3,16 +3,29 @@
 <head>
   <meta charset="utf-8" />
   <title>Tab Feed</title>
-  <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <meta http-equiv="Permissions-Policy" content="summarizer=(self)">
-  <link href="styles.css" rel="stylesheet" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <link rel="stylesheet" href="panel.css" />
 </head>
 <body>
-  <header>
-    <h1>Tab Feed</h1>
-    <div id="counts"></div>
+  <header class="tf-header">
+    <div class="brand">Tab Feed</div>
+    <div class="meta"><span id="counts">0 open tabs</span></div>
   </header>
-  <main id="grid" class="grid"></main>
+  <div class="tf-wrap"></div>
+    <nav id="filters" class="tf-nav"></nav>
+
+    <!-- Front page regions -->
+    <main class="tf-front">
+      <section id="region-hero" class="tf-hero"></section>
+      <section id="region-leads" class="tf-leads"></section>
+      <section id="region-main"  class="tf-main"></section>
+      <aside   id="region-rail"  class="tf-rail"></aside>
+    </main>
+  </div>
+
+  <!-- Fallback list grid for when no categories yet -->
+  <section id="grid" class="tf-grid" hidden></section>
+
   <script src="panel.js"></script>
 </body>
 </html>
