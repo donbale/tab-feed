@@ -12,7 +12,6 @@ function buildRelatedQuery(it) {
     const text = mdToText(it.summary).replace(/\s+/g, " ").trim();
     parts.push(text.split(" ").slice(0, 12).join(" "));
   }
-  if (it?.domain) parts.push(`site:${it.domain}`);
   const seen = new Set();
   const uniq = [];
   for (const p of parts) {
@@ -22,6 +21,7 @@ function buildRelatedQuery(it) {
   const q = uniq.join(" ");
   return `https://www.google.com/search?q=${encodeURIComponent(q)}`;
 }
+
 
 function timeAgo(ts) {
   if (!ts) return "";
