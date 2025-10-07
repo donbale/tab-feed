@@ -40,6 +40,24 @@ function estimateReadingMinutes(text = "") {
   return Math.max(1, Math.round(words / 220)); // ~220 wpm
 }
 
+// ---- Related Google search (for News tabs) ----
+function buildRelatedQuery(it) {
+  const parts = [];
+  if (it?.title) parts.push(it.title);
+  if (it?.summary) {
+    const text = mdToText(it.summary).replace(/\s+/g, " ").trim();
+    parts.push(text.split(" ").slice(0, 12).join(" "));
+  }
+  const seen = new Set();
+  const uniq = [];
+  for (const p of parts) {
+    const t = (p || "").trim();
+    if (t && !seen.has(t)) { seen.add(t); uniq.push(t); }
+  }
+  const q = uniq.join(" ");
+  return `https://www.google.com/search?q=${encodeURIComponent(q)}`;
+}
+
 // ---------- Summarizer ----------
 let summarizerInst = null;
 async function getSummarizer() {
@@ -267,17 +285,41 @@ function badgesRow(it) {
 function actionsBar(it) {
   const actions = document.createElement("div");
   actions.className = "actions";
-  const btn = (txt, handler) => { const b = document.createElement("button"); b.textContent = txt; b.onclick = (e)=>{ e.stopPropagation(); handler(); }; return b; };
+
+  const btn = (txt, handler) => {
+    const b = document.createElement("button");
+    b.textContent = txt;
+    b.onclick = (e) => { e.stopPropagation(); handler(); };
+    return b;
+  };
+
   const link = document.createElement("a");
-  link.href = it.url; link.target = "_blank"; link.rel = "noreferrer"; link.textContent = "Open link"; link.onclick = (e)=> e.stopPropagation();
+  link.href = it.url;
+  link.target = "_blank";
+  link.rel = "noreferrer";
+  link.textContent = "Open link";
+  link.onclick = (e) => e.stopPropagation();
 
-  actions.appendChild(btn("Focus", () => chrome.runtime.sendMessage({ type: "FOCUS_TAB", tabId: it.tabId, windowId: it.windowId })));
-  actions.appendChild(btn(it.pinned ? "Unpin" : "Pin", () => chrome.runtime.sendMessage({ type: "PIN_TOGGLE", tabId: it.tabId })));
-  actions.appendChild(btn("Close", () => chrome.runtime.sendMessage({ type: "CLOSE_TAB", tabId: it.tabId })));
+  actions.appendChild(btn("Focus", () =>
+    chrome.runtime.sendMessage({ type: "FOCUS_TAB", tabId: it.tabId, windowId: it.windowId })
+  ));
+  actions.appendChild(btn(it.pinned ? "Unpin" : "Pin", () =>
+    chrome.runtime.sendMessage({ type: "PIN_TOGGLE", tabId: it.tabId })
+  ));
+  actions.appendChild(btn("Close", () =>
+    chrome.runtime.sendMessage({ type: "CLOSE_TAB", tabId: it.tabId })
+  ));
+
+  // Related search on every tab
+  actions.appendChild(btn("Related search", () => {
+    const url = buildRelatedQuery(it);
+    chrome.tabs.create({ url });
+  }));
+
   actions.appendChild(link);
-
   return actions;
 }
+
 
 function card(it, { variant="standard" } = {}) {
   const el = document.createElement("article");

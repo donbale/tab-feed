@@ -129,6 +129,16 @@ async function injectContentIntoAllTabs() {
   }
 }
 
+// ---------- Google/SPA pass: re-ask every tab to parse (no injection) ----------
+async function forceReparseAllTabs() {
+  try {
+    const tabs = await chrome.tabs.query({});
+    for (const t of tabs) {
+      if (t.id && !isOwnTab(t)) requestParse(t.id);
+    }
+  } catch {}
+}
+
 // ---------- Robust opener ----------
 async function openUI(tab) {
   const url = PANEL_URL;
@@ -139,7 +149,8 @@ async function openUI(tab) {
     if (chrome.sidePanel?.open) {
       await chrome.sidePanel.open({ windowId: tab?.windowId });
       await reconcileAndBroadcast();
-      await injectContentIntoAllTabs();
+      await injectContentIntoAllTabs();   // ensure older tabs have content.js
+      await forceReparseAllTabs();        // and ask all to parse now (good for Google/SPAs)
       return;
     }
     throw new Error("sidePanel API unavailable");
@@ -147,6 +158,7 @@ async function openUI(tab) {
     await chrome.tabs.create({ url }).catch(() => {});
     await reconcileAndBroadcast();
     await injectContentIntoAllTabs();
+    await forceReparseAllTabs();
   }
 }
 chrome.action.onClicked.addListener(openUI);
@@ -157,12 +169,14 @@ chrome.runtime.onInstalled.addListener(async () => {
   await hydrateFromStorage();
   await reconcileAndBroadcast();
   await injectContentIntoAllTabs();
+  await forceReparseAllTabs();
 });
 chrome.runtime.onStartup.addListener(async () => {
   try { await chrome.sidePanel?.setOptions?.({ path: "panel.html", enabled: true }); } catch {}
   await hydrateFromStorage();
   await reconcileAndBroadcast();
   await injectContentIntoAllTabs();
+  await forceReparseAllTabs();
 });
 
 // ---------- Tab lifecycle ----------
@@ -222,6 +236,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         await hydrateFromStorage();                 // if SW just woke up
         await reconcileAndBroadcast();
         await injectContentIntoAllTabs();
+        await forceReparseAllTabs();
         sendResponse?.({ ok: true }); return;
       }
 
@@ -304,6 +319,7 @@ async function init() {
   await hydrateFromStorage();
   await reconcileAndBroadcast();
   await injectContentIntoAllTabs();
+  await forceReparseAllTabs();
 }
 init();
 

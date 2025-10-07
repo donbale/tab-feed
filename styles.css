@@ -38,3 +38,20 @@ a { color:var(--accent); text-decoration:none; margin-left:auto; }
 .actions { display:flex; gap:.5rem; align-items:center; margin-top:.75rem; }
 .actions a, .actions button { cursor:pointer; }
 .thumb.expanded { max-height:none; height:auto; }
+.btn {
+  background: var(--accent);
+  color: #0b0e14;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 6px 10px;
+  cursor: pointer;
+  font-weight: 600;
+}
+.btn:hover { filter: brightness(0.95); }
+.btn.tertiary { background: transparent; color: var(--fg); }
+
+.card-actions {
+  display: flex;
+  gap: 8px;
+  margin-top: 8px;
+}
