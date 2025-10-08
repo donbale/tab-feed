@@ -1,4 +1,4 @@
-// background.js — TabFeed (panel-only AI, persistent storage, stable updates)
+// background.js — TabFeed with Smart Bundles, persistent storage, panel-only AI
 console.log("[TabFeed] background boot", new Date().toISOString());
 
 // ---------- Constants ----------
@@ -8,6 +8,9 @@ const PANEL_URL   = chrome.runtime.getURL("panel.html");
 // ---------- State ----------
 const tabsIndex = new Map(); // tabId -> item
 let broadcastTimer = null;
+
+// --- Bundles state ---
+let bundles = []; // [{ id, title, tabIds:number[], createdAt, summary:"", tips:[] }]
 
 // ---------- Helpers ----------
 function isOwnTab(tabOrUrl) {
@@ -36,6 +39,9 @@ function toItemFromTab(t, prev = {}) {
     fullText: prev.fullText || "",
     summary: prev.summary || "",
     categories: prev.categories || [],
+    entities: prev.entities || null,
+    readingMinutes: prev.readingMinutes ?? null,
+    firstSeen: prev.firstSeen ?? Date.now(),
     pinned: !!t.pinned,
     audible: !!t.audible,
     updatedAt: Date.now()
@@ -60,12 +66,20 @@ function mergePayload(it, payload) {
   return merged;
 }
 
+async function loadBundles() {
+  const { bundles: b = [] } = await chrome.storage.local.get("bundles");
+  bundles = Array.isArray(b) ? b : [];
+}
+async function saveBundles() {
+  await chrome.storage.local.set({ bundles });
+}
+
 async function saveAndBroadcast() {
   const list = [...tabsIndex.values()]
     .filter(it => it.url && !isOwnTab(it.url))
     .sort(stableSort);
 
-  await chrome.storage.local.set({ tabs: list });
+  await chrome.storage.local.set({ tabs: list, bundles });
   chrome.runtime.sendMessage({ type: "TABS_UPDATED" }).catch(() => {});
 }
 
@@ -129,16 +143,6 @@ async function injectContentIntoAllTabs() {
   }
 }
 
-// ---------- Google/SPA pass: re-ask every tab to parse (no injection) ----------
-async function forceReparseAllTabs() {
-  try {
-    const tabs = await chrome.tabs.query({});
-    for (const t of tabs) {
-      if (t.id && !isOwnTab(t)) requestParse(t.id);
-    }
-  } catch {}
-}
-
 // ---------- Robust opener ----------
 async function openUI(tab) {
   const url = PANEL_URL;
@@ -149,8 +153,7 @@ async function openUI(tab) {
     if (chrome.sidePanel?.open) {
       await chrome.sidePanel.open({ windowId: tab?.windowId });
       await reconcileAndBroadcast();
-      await injectContentIntoAllTabs();   // ensure older tabs have content.js
-      await forceReparseAllTabs();        // and ask all to parse now (good for Google/SPAs)
+      await injectContentIntoAllTabs();
       return;
     }
     throw new Error("sidePanel API unavailable");
@@ -158,7 +161,6 @@ async function openUI(tab) {
     await chrome.tabs.create({ url }).catch(() => {});
     await reconcileAndBroadcast();
     await injectContentIntoAllTabs();
-    await forceReparseAllTabs();
   }
 }
 chrome.action.onClicked.addListener(openUI);
@@ -167,16 +169,16 @@ chrome.action.onClicked.addListener(openUI);
 chrome.runtime.onInstalled.addListener(async () => {
   try { await chrome.sidePanel?.setOptions?.({ path: "panel.html", enabled: true }); } catch {}
   await hydrateFromStorage();
+  await loadBundles();
   await reconcileAndBroadcast();
   await injectContentIntoAllTabs();
-  await forceReparseAllTabs();
 });
 chrome.runtime.onStartup.addListener(async () => {
   try { await chrome.sidePanel?.setOptions?.({ path: "panel.html", enabled: true }); } catch {}
   await hydrateFromStorage();
+  await loadBundles();
   await reconcileAndBroadcast();
   await injectContentIntoAllTabs();
-  await forceReparseAllTabs();
 });
 
 // ---------- Tab lifecycle ----------
@@ -193,9 +195,7 @@ chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
   tabsIndex.set(tabId, toItemFromTab(tab, tabsIndex.get(tabId) || {}));
   scheduleBroadcast();
 
-  // If the URL changed (SPA sometimes updates url without "complete")
   if (changeInfo.url) requestParse(tabId);
-
   if (changeInfo.status === "complete") requestParse(tabId);
 });
 
@@ -217,13 +217,10 @@ chrome.tabs.onRemoved.addListener((tabId) => {
 
 // ---------- ALSO catch SPA navigations ----------
 chrome.webNavigation?.onHistoryStateUpdated?.addListener((details) => {
-  // pushState/replaceState navigations (same document)
-  if (details.frameId !== 0) return; // main frame only
+  if (details.frameId !== 0) return;
   requestParse(details.tabId);
 });
-
 chrome.webNavigation?.onCommitted?.addListener((details) => {
-  // new document commits
   if (details.frameId !== 0) return;
   requestParse(details.tabId);
 });
@@ -233,16 +230,16 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   const run = async () => {
     try {
       if (msg?.type === "PANEL_OPENED") {
-        await hydrateFromStorage();                 // if SW just woke up
+        await hydrateFromStorage();
+        await loadBundles();
         await reconcileAndBroadcast();
         await injectContentIntoAllTabs();
-        await forceReparseAllTabs();
         sendResponse?.({ ok: true }); return;
       }
 
       if (msg?.type === "GET_TABS_NOW") {
         const { tabs = [] } = await chrome.storage.local.get("tabs");
-        sendResponse?.({ ok: true, tabs }); return;
+        sendResponse?.({ ok: true, tabs, bundles }); return;
       }
 
       if (msg?.type === "TAB_CONTENT" && sender.tab?.id != null) {
@@ -279,6 +276,30 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         sendResponse?.({ ok: true }); return;
       }
 
+      if (msg?.type === "TAB_ENTITIES_FROM_PANEL") {
+        const { tabId, entities } = msg;
+        const it = tabsIndex.get(tabId);
+        if (it) {
+          it.entities = entities || null;
+          it.updatedAt = Date.now();
+          tabsIndex.set(tabId, it);
+          scheduleBroadcast();
+        }
+        sendResponse?.({ ok: true }); return;
+      }
+
+      if (msg?.type === "TAB_READINGTIME_FROM_PANEL") {
+        const { tabId, minutes } = msg;
+        const it = tabsIndex.get(tabId);
+        if (it && Number.isFinite(minutes)) {
+          it.readingMinutes = minutes;
+          it.updatedAt = Date.now();
+          tabsIndex.set(tabId, it);
+          scheduleBroadcast();
+        }
+        sendResponse?.({ ok: true }); return;
+      }
+
       // ---- panel commands ----
       if (msg?.type === "FOCUS_TAB") {
         await chrome.tabs.update(msg.tabId, { active: true });
@@ -304,6 +325,51 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         scheduleBroadcast();
         sendResponse?.({ ok: true }); return;
       }
+
+      // ---- Bundles ----
+      if (msg?.type === "BUNDLE_CREATE") {
+        const id = Math.random().toString(36).slice(2);
+        bundles.push({
+          id,
+          title: msg.title || "Bundle",
+          tabIds: (msg.tabIds || []).filter(n => Number.isFinite(n)),
+          createdAt: Date.now(),
+          summary: "",
+          tips: []
+        });
+        await saveBundles();
+        await saveAndBroadcast();
+        sendResponse?.({ ok: true, id }); return;
+      }
+
+      if (msg?.type === "BUNDLE_UPDATE_CONTENT") {
+        const b = bundles.find(x => x.id === msg.id);
+        if (b) {
+          if (typeof msg.summary === "string") b.summary = msg.summary;
+          if (Array.isArray(msg.tips)) b.tips = msg.tips;
+          await saveBundles();
+          await saveAndBroadcast();
+        }
+        sendResponse?.({ ok: true }); return;
+      }
+
+      if (msg?.type === "BUNDLE_REMOVE_TAB") {
+        const b = bundles.find(x => x.id === msg.id);
+        if (b) {
+          b.tabIds = b.tabIds.filter(tid => tid !== msg.tabId);
+          await saveBundles();
+          await saveAndBroadcast();
+        }
+        sendResponse?.({ ok: true }); return;
+      }
+
+      if (msg?.type === "BUNDLE_DELETE") {
+        bundles = bundles.filter(x => x.id !== msg.id);
+        await saveBundles();
+        await saveAndBroadcast();
+        sendResponse?.({ ok: true }); return;
+      }
+
     } catch (e) {
       console.error("[TabFeed][bg] onMessage error:", e);
     }
@@ -314,12 +380,12 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   return false;
 });
 
-// ---------- Kick startup work (NO top-level await) ----------
+// ---------- Kick startup work ----------
 async function init() {
   await hydrateFromStorage();
+  await loadBundles();
   await reconcileAndBroadcast();
   await injectContentIntoAllTabs();
-  await forceReparseAllTabs();
 }
 init();
 

@@ -1,31 +1,234 @@
 <!doctype html>
-<html>
+<html lang="en">
 <head>
   <meta charset="utf-8" />
-  <title>Tab Feed</title>
   <meta name="viewport" content="width=device-width,initial-scale=1" />
-  <link rel="stylesheet" href="panel.css" />
+  <title>Tab Feed</title>
+  <style>
+    :root {
+      --bg: #0b0e13;
+      --card: #121722;
+      --muted: #7f8aa3;
+      --text: #e9eefb;
+      --accent: #4da3ff;
+      --chip: #1a2233;
+      --chip-border: #27314a;
+      --good: #35c28d;
+    }
+    * { box-sizing: border-box }
+    html, body {
+      margin: 0;
+      padding: 0;
+      background: var(--bg);
+      color: var(--text);
+      font: 14px/1.45 system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial, "Apple Color Emoji", "Segoe UI Emoji";
+    }
+
+    /* Page frame */
+    .wrap {
+      max-width: 1200px;
+      margin: 0 auto;
+      padding: 18px 16px 56px;
+    }
+
+    header {
+      display: flex;
+      gap: 16px;
+      align-items: center;
+      justify-content: space-between;
+      margin-bottom: 12px;
+    }
+    #counts { color: var(--muted) }
+
+    /* Filters (categories) */
+    #filters {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      margin: 6px 0 16px;
+    }
+    #filters button {
+      background: var(--chip);
+      border: 1px solid var(--chip-border);
+      color: var(--text);
+      border-radius: 999px;
+      padding: 6px 10px;
+      cursor: pointer;
+    }
+    #filters button.active {
+      background: #20304a;
+      border-color: #3b4e74;
+      color: #cfe2ff;
+    }
+
+    .suggestions .banner{
+      background:#142034;border:1px solid #22314d;padding:10px 12px;border-radius:10px;margin:10px 0;
+      display:flex;gap:10px;align-items:center;justify-content:space-between
+    }
+    .card.bundle h2{margin:0 0 2px}
+
+    .banner {
+      background: #121c2b;
+      border: 1px solid #22324f;
+      border-radius: 12px;
+      padding: 12px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+    }
+    .banner .meta { color: var(--muted); font-size: 12px }
+    .banner button {
+      background: var(--accent);
+      border: none;
+      color: #07101d;
+      font-weight: 600;
+      padding: 8px 12px;
+      border-radius: 10px;
+      cursor: pointer;
+    }
+
+    /* Regions layout (front page style) */
+    .regions {
+      display: grid;
+      gap: 12px;
+      grid-template-columns: 2fr 1.2fr 1fr;
+      grid-template-areas:
+        "hero leads rail"
+        "main main rail";
+    }
+    #region-hero  { grid-area: hero;  display: grid; gap: 12px }
+    #region-leads { grid-area: leads; display: grid; gap: 12px }
+    #region-main  { grid-area: main;  display: grid; gap: 12px; grid-template-columns: repeat(3, 1fr) }
+    #region-rail  { grid-area: rail;  display: grid; gap: 12px }
+
+    /* Cards */
+    .card {
+      background: var(--card);
+      border: 1px solid #1b2436;
+      border-radius: 16px;
+      padding: 12px;
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+      cursor: pointer;
+      transition: transform .06s ease, border-color .06s ease;
+    }
+    .card:hover { transform: translateY(-1px); border-color: #2a3a58 }
+    .card.bundle { cursor: default }
+
+    .thumb {
+      width: 100%;
+      height: 160px;
+      object-fit: cover;
+      border-radius: 12px;
+      background: #0f1520;
+      border: 1px solid #1b2436;
+    }
+    .thumb.hero { height: 300px }
+    .thumb.expanded { height: 340px }
+
+    h1 {
+      margin: 0;
+      font-size: 18px;
+      letter-spacing: 0.2px;
+    }
+    h2 {
+      margin: 0;
+      font-size: 16px;
+      letter-spacing: 0.2px;
+    }
+    .meta { color: var(--muted); font-size: 12px }
+
+    .summary {
+      white-space: pre-wrap;
+      font-size: 13px;
+      color: #d8e6ff;
+    }
+
+    .chips {
+      display: flex; flex-wrap: wrap; gap: 6px;
+    }
+    .chip {
+      background: var(--chip);
+      border: 1px solid var(--chip-border);
+      color: #cfe2ff;
+      border-radius: 999px;
+      padding: 3px 8px;
+      font-size: 12px;
+    }
+
+    .actions, .card-actions {
+      display: flex; gap: 8px; flex-wrap: wrap;
+    }
+    .actions button, .card-actions .btn {
+      background: #1a2a44;
+      border: 1px solid #2a3a58;
+      color: #d9e6ff;
+      border-radius: 10px;
+      padding: 6px 10px;
+      cursor: pointer;
+    }
+    .card-actions .btn.tertiary {
+      background: #152037;
+      border-color: #22324f;
+      color: #b8c9e6;
+    }
+    .actions a {
+      color: var(--accent);
+      text-decoration: none;
+      padding: 6px 0;
+    }
+
+    /* Bundles section area */
+    #bundles { margin-top: 18px; display: grid; gap: 12px; grid-template-columns: 1fr 1fr }
+    @media (max-width: 1100px) {
+      .regions { grid-template-columns: 1fr; grid-template-areas:
+        "hero" "leads" "main" "rail"; }
+      #region-main { grid-template-columns: repeat(2, 1fr) }
+      #bundles { grid-template-columns: 1fr }
+    }
+    @media (max-width: 720px) {
+      #region-main { grid-template-columns: 1fr }
+    }
+
+    /* (Optional) legacy grid list (hidden by JS) */
+    #grid { display: none }
+  </style>
 </head>
 <body>
-  <header class="tf-header">
-    <div class="brand">Tab Feed</div>
-    <div class="meta"><span id="counts">0 open tabs</span></div>
-  </header>
-  <div class="tf-wrap"></div>
-    <nav id="filters" class="tf-nav"></nav>
+  <div class="wrap">
+    <header>
+      <h1>Tab Feed</h1>
+      <div id="counts">—</div>
+    </header>
 
-    <!-- Front page regions -->
-    <main class="tf-front">
-      <section id="region-hero" class="tf-hero"></section>
-      <section id="region-leads" class="tf-leads"></section>
-      <section id="region-main"  class="tf-main"></section>
-      <aside   id="region-rail"  class="tf-rail"></aside>
-    </main>
+    <!-- category filters -->
+    <nav id="filters" aria-label="Filters"></nav>
+
+    <!-- smart bundle suggestions banner -->
+    <div id="suggestions" class="suggestions"></div>
+
+    <!-- front page layout -->
+    <section class="regions" aria-label="Front page">
+      <div id="region-hero"></div>
+      <div id="region-leads"></div>
+      <div id="region-main"></div>
+      <div id="region-rail"></div>
+    </section>
+
+    <!-- bundles section -->
+    <section id="bundles" aria-label="Bundles"></section>
+
+    <!-- legacy simple grid (kept for compatibility with panel.js, but hidden) -->
+    <section id="grid" aria-label="All tabs"></section>
+
+    <!-- Optional dev control:
+    <button id="classifyAll" style="margin-top:14px">Classify all</button>
+    -->
   </div>
 
-  <!-- Fallback list grid for when no categories yet -->
-  <section id="grid" class="tf-grid" hidden></section>
-
+  <!-- Script last -->
   <script src="panel.js"></script>
 </body>
 </html>

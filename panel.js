@@ -1,4 +1,4 @@
-// panel.js — Front Page + Summarizer + Prompt classification + Entities + Reading-time badges
+// panel.js — Front Page + Summarizer + Prompt classification + Entities + Reading-time badges + Smart Bundles
 
 const counts = document.getElementById("counts");
 const elHero  = document.getElementById("region-hero");
@@ -7,6 +7,10 @@ const elMain  = document.getElementById("region-main");
 const elRail  = document.getElementById("region-rail");
 const listGrid= document.getElementById("grid"); // optional / hidden
 const nav     = document.getElementById("filters");
+
+// --- Smart Bundles regions (new) ---
+const elBundles = document.getElementById("bundles");
+const elSuggestions = document.getElementById("suggestions");
 
 // ---------- utils ----------
 function timeAgo(ts) {
@@ -40,7 +44,7 @@ function estimateReadingMinutes(text = "") {
   return Math.max(1, Math.round(words / 220)); // ~220 wpm
 }
 
-// ---- Related Google search (for News tabs) ----
+// ---- Related Google search (for all tabs) ----
 function buildRelatedQuery(it) {
   const parts = [];
   if (it?.title) parts.push(it.title);
@@ -257,7 +261,6 @@ function entitiesBar(entities) {
 function badgesRow(it) {
   const row = document.createElement("div");
   row.className = "chips";
-  // Estimated reading time
   const rt = document.createElement("span");
   rt.className = "chip";
   const minutes = (typeof it.readingMinutes === "number")
@@ -266,14 +269,12 @@ function badgesRow(it) {
   if (minutes != null) rt.textContent = `~${minutes} min`; else rt.textContent = "~— min";
   row.appendChild(rt);
 
-  // Tab age (since firstSeen)
   const age = document.createElement("span");
   age.className = "chip";
   const first = it.firstSeen || it.updatedAt || Date.now();
   age.textContent = `opened ${timeAgo(first)}`;
   row.appendChild(age);
 
-  // if we computed locally but not saved yet, persist
   if (it.tabId && it.fullText && it.readingMinutes == null && minutes != null) {
     chrome.runtime.sendMessage({ type: "TAB_READINGTIME_FROM_PANEL", tabId: it.tabId, minutes }).catch(()=>{});
   }
@@ -310,7 +311,6 @@ function actionsBar(it) {
     chrome.runtime.sendMessage({ type: "CLOSE_TAB", tabId: it.tabId })
   ));
 
-  // Related search on every tab
   actions.appendChild(btn("Related search", () => {
     const url = buildRelatedQuery(it);
     chrome.tabs.create({ url });
@@ -319,7 +319,6 @@ function actionsBar(it) {
   actions.appendChild(link);
   return actions;
 }
-
 
 function card(it, { variant="standard" } = {}) {
   const el = document.createElement("article");
@@ -345,14 +344,11 @@ function card(it, { variant="standard" } = {}) {
   const cats = chipBar(it.categories || []);
   if (cats) el.appendChild(cats);
 
-  // Badges: reading time + tab age
   el.appendChild(badgesRow(it));
 
-  // Entities chips (if we have them)
   const ents = entitiesBar(it.entities);
   if (ents) el.appendChild(ents);
 
-  // Summary (with content-signature requeue)
   const sum = document.createElement("div");
   sum.className = "summary";
   const sig = [(it.url || ""), (it.title || ""), (it.fullText ? it.fullText.length : 0)].join("|");
@@ -380,7 +376,6 @@ function card(it, { variant="standard" } = {}) {
 
   el.appendChild(actionsBar(it));
 
-  // Queue AI jobs if needed
   if ((!Array.isArray(it.categories) || it.categories.length === 0) &&
       it.fullText && it.fullText.length >= 120) {
     classifyQueue.push(it);
@@ -417,27 +412,217 @@ function renderFront(items) {
   runSummaryQueue();
 }
 
+// ---------- Smart Bundles (NEW) ----------
+
+// Tab cue text used for clustering
+function tabCue(it) {
+  const ents = it.entities || {};
+  const e = [...(ents.people||[]), ...(ents.orgs||[]), ...(ents.places||[])].slice(0,6).join(", ");
+  const host = it.domain || "";
+  return `id:${it.tabId} title:${(it.title||"").slice(0,120)} domain:${host} ents:${e}`;
+}
+
+// Ask LM to propose up to 2 bundles (3+ tabs each)
+async function suggestBundlesFromTabs(tabs) {
+  const lm = await getLM();
+  if (!lm) return [];
+  const cues = tabs.map(tabCue).join("\n");
+  const system = `Group related browser tabs into at most 2 thematic bundles.
+Return strict JSON: [{"title":"...", "tabIds":[...]}]
+Rules:
+- title: short (2-5 words), descriptive (e.g., "Jurassic Coast trip", "Swansea planning", "TypeScript generics").
+- tabIds: numeric ids from the cues.
+- Only group if 3+ tabs clearly fit the theme.
+- If no clear groups, return [].`;
+  try {
+    const out = await lm.prompt([
+      { role:"system", content: system },
+      { role:"user", content: cues }
+    ]);
+    let arr; try { arr = JSON.parse(out); } catch {}
+    if (!Array.isArray(arr)) return [];
+    return arr
+      .map(b => ({ title: String(b.title||"").trim(), tabIds: (b.tabIds||[]).filter(n => Number.isFinite(n)) }))
+      .filter(b => b.title && b.tabIds.length >= 3)
+      .slice(0, 2);
+  } catch { return []; }
+}
+
+// Render banner(s) offering bundle creation
+function renderSuggestions(bundlesProposed, tabsById) {
+  if (!elSuggestions) return;
+  elSuggestions.innerHTML = "";
+  if (!bundlesProposed || !bundlesProposed.length) return;
+
+  for (const b of bundlesProposed) {
+    const wrap = document.createElement("div");
+    wrap.className = "banner";
+    const names = b.tabIds.map(id => (tabsById.get(id)?.title || tabsById.get(id)?.domain || id)).slice(0,3);
+    const title = document.createElement("div");
+    title.innerHTML = `<strong>It looks like you're working on “${b.title}”.</strong>`;
+    const meta = document.createElement("div");
+    meta.className = "meta";
+    meta.textContent = `${b.tabIds.length} tabs match • e.g., ${names.join(" • ")}`;
+    const mk = document.createElement("button");
+    mk.textContent = "Create bundle";
+    mk.onclick = async (e) => {
+      e.stopPropagation();
+      const res = await new Promise(r => chrome.runtime.sendMessage({ type: "BUNDLE_CREATE", title: b.title, tabIds: b.tabIds }, r));
+      if (res?.ok) {
+        hydrate(); // show it
+        summarizeBundle(res.id); // kick cross-summary + tips
+      }
+    };
+    wrap.appendChild(title);
+    wrap.appendChild(meta);
+    wrap.appendChild(mk);
+    elSuggestions.appendChild(wrap);
+  }
+}
+
+// Summarize+tips across tabs in a bundle
+async function summarizeBundle(bundleId) {
+  const snap = await new Promise(r => chrome.runtime.sendMessage({ type:"GET_TABS_NOW" }, r));
+  const bundle = (snap?.bundles || []).find(b => b.id === bundleId);
+  if (!bundle) return;
+  const tabsById = new Map((snap?.tabs||[]).map(t => [t.tabId, t]));
+  const items = bundle.tabIds.map(id => tabsById.get(id)).filter(Boolean);
+
+  const joined = items.map(it => `# ${it.title}\n${(it.summary || it.description || (it.fullText||"").slice(0,600))}\n`).join("\n");
+  const smz = await getSummarizer();
+  let bundleSummary = "";
+  if (smz) {
+    try {
+      const out = await smz.summarize(joined.slice(0, 8000), { format:"markdown", output:{ language:"en" } });
+      bundleSummary = (typeof out === "string") ? out : (out?.summary || "");
+    } catch {}
+  }
+
+  const lm = await getLM();
+  let tips = [];
+  if (lm) {
+    const kindGuess = bundle.title.toLowerCase().match(/travel|trip|itinerary|visit|hotel|map|sights/) ? "travel" : "study";
+    const sys = `Given a user bundle of browser tabs, suggest 3-6 next steps.
+Return strict JSON array of short strings like:
+- For travel: ["Map key sights", "Draft 2-day itinerary", "Check train times", "Find local weather"]
+- For study: ["Skim overview article", "Make flashcards of key terms", "Collect primary sources"]
+No commentary.`;
+    const usr = `Bundle title: ${bundle.title}
+Kind: ${kindGuess}
+Material:
+"""${joined.slice(0, 2000)}"""`;
+    try {
+      const out = await lm.prompt([{ role:"system", content: sys }, { role:"user", content: usr }]);
+      let arr; try { arr = JSON.parse(out); } catch {}
+      tips = Array.isArray(arr) ? arr.map(s => String(s).trim()).filter(Boolean).slice(0,6) : [];
+    } catch {}
+  }
+
+  chrome.runtime.sendMessage({
+    type: "BUNDLE_UPDATE_CONTENT",
+    id: bundleId,
+    summary: bundleSummary,
+    tips
+  });
+}
+
+// Render bundles section
+function renderBundles(bundles, tabsById) {
+  if (!elBundles) return;
+  elBundles.innerHTML = "";
+  if (!bundles || !bundles.length) return;
+
+  for (const b of bundles) {
+    const box = document.createElement("article");
+    box.className = "card bundle";
+    const count = b.tabIds.length;
+    const h = document.createElement("h2");
+    h.textContent = `🗂️ ${b.title}`;
+    const meta = document.createElement("div");
+    meta.className = "meta";
+    meta.textContent = `${count} tab${count===1?"":"s"} • created ${timeAgo(b.createdAt)}`;
+    const sum = document.createElement("div");
+    sum.className = "summary";
+    sum.textContent = b.summary ? mdToText(b.summary) : "Generating bundle summary…";
+
+    box.appendChild(h);
+    box.appendChild(meta);
+    box.appendChild(sum);
+
+    if (Array.isArray(b.tips) && b.tips.length) {
+      const tips = document.createElement("div");
+      tips.className = "chips";
+      for (const t of b.tips) {
+        const c = document.createElement("span");
+        c.className = "chip";
+        c.textContent = t;
+        tips.appendChild(c);
+      }
+      box.appendChild(tips);
+    }
+
+    const list = document.createElement("div");
+    list.style.display = "grid";
+    list.style.gridTemplateColumns = "1fr 1fr";
+    list.style.gap = "6px";
+    for (const id of b.tabIds.slice(0, 8)) {
+      const it = tabsById.get(id);
+      if (!it) continue;
+      const a = document.createElement("a");
+      a.className = "chip";
+      a.textContent = (it.title || it.domain || id).slice(0, 48);
+      a.href = it.url; a.target = "_blank"; a.rel = "noreferrer";
+      list.appendChild(a);
+    }
+    box.appendChild(list);
+
+    const actions = document.createElement("div");
+    actions.className = "actions";
+    const btn = (txt, fn) => { const btt = document.createElement("button"); btt.textContent = txt; btt.onclick = (e)=>{ e.stopPropagation(); fn(); }; return btt; };
+    actions.appendChild(btn("Re-summarize", () => summarizeBundle(b.id)));
+    actions.appendChild(btn("Delete bundle", async () => {
+      await new Promise(r => chrome.runtime.sendMessage({ type:"BUNDLE_DELETE", id:b.id }, r));
+      hydrate();
+    }));
+    box.appendChild(actions);
+
+    elBundles.appendChild(box);
+  }
+}
+
 // ---------- hydrate & filters ----------
-function render(items) {
+function render(items, bundlesData = []) {
   const anyCats = items.some(it => Array.isArray(it.categories) && it.categories.length);
   nav.innerHTML = ""; if (anyCats) renderFilters(items);
   if (listGrid) listGrid.hidden = true;
   renderFront(items);
+
+  // Bundles section
+  const tabsById = new Map(items.map(t => [t.tabId, t]));
+  renderBundles(bundlesData, tabsById);
+
+  // Suggest smart bundles (non-blocking)
+  suggestBundlesFromTabs(items).then(proposals => {
+    renderSuggestions(proposals, tabsById);
+  }).catch(()=>{});
 }
 
 async function fetchTabsFromSW() {
   return new Promise((resolve) => {
     chrome.runtime.sendMessage({ type: "GET_TABS_NOW" }, (res) => {
-      if (res && res.ok && Array.isArray(res.tabs)) resolve(res.tabs);
+      if (res && res.ok && Array.isArray(res.tabs)) resolve(res);
       else resolve(null);
     });
   });
 }
 async function hydrate() {
   const sw = await fetchTabsFromSW();
-  if (sw) { render(sw); return; }
-  const { tabs = [] } = await chrome.storage.local.get("tabs");
-  render(Array.isArray(tabs) ? tabs : []);
+  if (sw) {
+    render(sw.tabs || [], sw.bundles || []);
+    return;
+  }
+  const { tabs = [], bundles = [] } = await chrome.storage.local.get(["tabs","bundles"]);
+  render(Array.isArray(tabs) ? tabs : [], Array.isArray(bundles) ? bundles : []);
 }
 
 chrome.runtime.onMessage.addListener((msg) => {
