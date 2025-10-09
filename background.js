@@ -8,6 +8,194 @@ const PANEL_URL   = chrome.runtime.getURL("panel.html");
 // ---------- State ----------
 const tabsIndex = new Map(); // tabId -> item
 let broadcastTimer = null;
+let saveTimer = null;
+
+// ---------- Summarizer (moved from panel.js) ----------
+let summarizerInst = null;
+async function getSummarizer() {
+  try {
+    const API = globalThis.Summarizer || (globalThis.ai && globalThis.ai.summarizer);
+    if (!API) return null;
+    const caps = API.capabilities ? await API.capabilities() : await API.availability?.();
+    if (!caps || caps.available === "no") return null;
+    if (!summarizerInst) {
+      summarizerInst = await API.create({
+        type: "key-points",
+        length: "short",
+        format: "markdown",
+        output: { language: "en" }
+      });
+    }
+    return summarizerInst;
+  } catch (e) {
+    console.error("[TabFeed][bg] getSummarizer failed", e);
+    return null;
+  }
+}
+async function summarizeMD(text) {
+  const inst = await getSummarizer();
+  if (!inst) return null;
+  try {
+    const out = await inst.summarize((text || "").slice(0, 1000), {
+      format: "markdown",
+      output: { language: "en" }
+    });
+    return typeof out === "string" ? out : (out?.summary || "");
+  } catch (e) {
+    console.warn("[TabFeed] Summarize failed", e);
+    return null;
+  }
+}
+
+const lastSummarizedSig = new Map(); // tabId -> sig
+let summaryQueue = [];
+let summaryRunning = false;
+const MAX_CONCURRENT_SUMMARIES = 5;
+async function runSummaryQueue() {
+  if (summaryRunning) return;
+  summaryRunning = true;
+  while (summaryQueue.length > 0) {
+    const itemsToProcess = summaryQueue.splice(0, MAX_CONCURRENT_SUMMARIES);
+    await Promise.all(itemsToProcess.map(async (it) => {
+      const md = await summarizeMD(it.fullText);
+      if (md) {
+        const tab = tabsIndex.get(it.tabId);
+        if (tab) {
+          tab.summary = md;
+          tab.updatedAt = Date.now();
+          tabsIndex.set(it.tabId, tab);
+        }
+      }
+    }));
+    scheduleSaveAndBroadcast();
+  }
+  summaryRunning = false;
+}
+
+// ---------- Classification (moved from panel.js) ----------
+async function getLM() {
+  try {
+    const LM = globalThis.LanguageModel || (globalThis.ai && globalThis.ai.languageModel);
+    if (!LM) return null;
+    const session = await LM.create?.({
+      expectedInputs:  [{ type: "text", languages: ["en"] }],
+      expectedOutputs: [{ type: "text", languages: ["en"] }]
+    });
+    return session || null;
+  } catch (e) {
+    console.error("[TabFeed][bg] getLM failed", e);
+    return null;
+  }
+}
+
+const CATEGORY_ENUM = [
+  "News","Technology","Developer Docs","Research","Video","Social",
+  "Shopping","Entertainment","Finance","Sports","Productivity","Other"
+];
+
+async function classifyTabContent(fullText, url, title, description) {
+  const lm = await getLM();
+  if (!lm) return null;
+  const domain = (() => { try { return new URL(url).hostname.replace(/^www\./,""); } catch { return ""; }})();
+  const text = (fullText || description || title || "").slice(0, 1000);
+
+  const systemPrompt = `You are a browser tab classifier.
+Choose up to 3 categories from: ${CATEGORY_ENUM.join(", ")}.
+Return ONLY a JSON array of strings, e.g. ["News","Technology"].`;
+  const userPrompt = `Domain: ${domain}
+Title: ${title || ""}
+Description: ${description || ""}
+Text: """${text}"""`;
+
+  try {
+    const res = await lm.prompt([{ role: "system", content: systemPrompt }, { role: "user", content: userPrompt }]);
+    let parsed; try { parsed = JSON.parse(res); } catch {}
+    if (!Array.isArray(parsed)) parsed = ["Other"];
+    const clean = parsed.map(s => String(s).trim()).filter(s => CATEGORY_ENUM.includes(s)).slice(0,3);
+    return { categories: clean.length ? clean : ["Other"] };
+  } catch (e) {
+    console.warn("[TabFeed][panel] classify failed:", e);
+    return null;
+  }
+}
+
+let classifyQueue = [];
+let classifyRunning = false;
+async function runClassifyQueue() {
+  if (classifyRunning) return;
+  classifyRunning = true;
+  while (classifyQueue.length > 0) {
+    const itemsToProcess = classifyQueue.splice(0, 5); // Process in batches of 5
+    await Promise.all(itemsToProcess.map(async (it) => {
+      if (!(it.fullText && it.fullText.length >= 120)) return;
+      if (Array.isArray(it.categories) && it.categories.length) return;
+      const result = await classifyTabContent(it.fullText, it.url, it.title, it.description);
+      if (result && result.categories) {
+        const tab = tabsIndex.get(it.tabId);
+        if (tab) {
+          tab.categories = result.categories;
+          tab.updatedAt = Date.now();
+          tabsIndex.set(it.tabId, tab);
+        }
+      }
+    }));
+    scheduleSaveAndBroadcast(); // Broadcast after each batch
+  }
+  classifyRunning = false;
+}
+
+// ---------- Entity Extraction (moved from panel.js) ----------
+async function extractEntities(fullText, url, title, description) {
+  const lm = await getLM();
+  if (!lm) return null;
+
+  const snippet = (fullText || description || title || "").slice(0, 1200);
+  const system = `Extract named entities from a news/article snippet.
+Return STRICT JSON: {"people":[...], "orgs":[...], "places":[...]}
+- Each list: 0-6 short strings
+- No commentary. JSON only.`;
+  const user = `Title: ${title || ""}
+URL: ${url || ""}
+Text: """${snippet}"""`;
+
+  try {
+    const out = await lm.prompt([{ role: "system", content: system }, { role: "user", content: user }]);
+    let obj; try { obj = JSON.parse(out); } catch {}
+    if (!obj) return null;
+    const norm = (arr) => (Array.isArray(arr) ? arr.map(s => String(s).trim()).filter(Boolean).slice(0,6) : []);
+    return { people: norm(obj.people), orgs: norm(obj.orgs), places: norm(obj.places) };
+  } catch (e) {
+    console.warn("[TabFeed][panel] entities failed:", e);
+    return null;
+  }
+}
+
+let entitiesQueue = [];
+let entitiesRunning = false;
+async function runEntitiesQueue() {
+  if (entitiesRunning) return;
+  entitiesRunning = true;
+  while (entitiesQueue.length > 0) {
+    const itemsToProcess = entitiesQueue.splice(0, 5); // Process in batches of 5
+    await Promise.all(itemsToProcess.map(async (it) => {
+      if (!(it.fullText && it.fullText.length >= 120)) return;
+      if (it.entities && (it.entities.people?.length || it.entities.orgs?.length || it.entities.places?.length)) return;
+      const ents = await extractEntities(it.fullText, it.url, it.title, it.description);
+      if (ents) {
+        const tab = tabsIndex.get(it.tabId);
+        if (tab) {
+          tab.entities = ents;
+          tab.updatedAt = Date.now();
+          tabsIndex.set(it.tabId, tab);
+        }
+      }
+    }));
+    scheduleSaveAndBroadcast(); // Broadcast after each batch
+  }
+  entitiesRunning = false;
+}
+
+
 
 // ---------- Helpers ----------
 function isOwnTab(tabOrUrl) {
@@ -69,6 +257,11 @@ async function saveAndBroadcast() {
   chrome.runtime.sendMessage({ type: "TABS_UPDATED" }).catch(() => {});
 }
 
+function scheduleSaveAndBroadcast() {
+  clearTimeout(saveTimer);
+  saveTimer = setTimeout(saveAndBroadcast, 1000);
+}
+
 async function reconcileAndBroadcast() {
   const openTabs = await chrome.tabs.query({});
   const liveIds = new Set();
@@ -89,7 +282,7 @@ async function reconcileAndBroadcast() {
 
 function scheduleBroadcast() {
   clearTimeout(broadcastTimer);
-  broadcastTimer = setTimeout(() => { reconcileAndBroadcast(); }, 80);
+  broadcastTimer = setTimeout(() => { reconcileAndBroadcast(); }, 500);
 }
 
 async function requestParse(tabId) {
@@ -251,31 +444,35 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         const prev = tabsIndex.get(t.id) || {};
         const merged = mergePayload(toItemFromTab(t, prev), msg.payload || {});
         tabsIndex.set(t.id, merged);
+
+        // Summarize if needed
+        const sig = [(merged.url || ""), (merged.title || ""), (merged.fullText ? merged.fullText.length : 0)].join("|");
+        const prevSig = lastSummarizedSig.get(t.id);
+        if (merged.fullText && merged.fullText.length >= 120 && prevSig !== sig) {
+          console.log(`[TabFeed][bg] Queuing summary for tab ${t.id}`);
+          summaryQueue.push(merged);
+          lastSummarizedSig.set(t.id, sig);
+          runSummaryQueue();
+        }
+
+        // Classify if needed
+        if ((!Array.isArray(merged.categories) || merged.categories.length === 0) &&
+            merged.fullText && merged.fullText.length >= 120) {
+          // Check if the tab is already in the queue
+          if (!classifyQueue.some(item => item.tabId === merged.tabId)) {
+            classifyQueue.push(merged);
+          }
+          runClassifyQueue();
+        }
+
+        // Extract entities if needed
+        if (merged.fullText && merged.fullText.length >= 120 &&
+            !(merged.entities && (merged.entities.people?.length || merged.entities.orgs?.length || merged.entities.places?.length))) {
+          entitiesQueue.push(merged);
+          runEntitiesQueue();
+        }
+
         scheduleBroadcast();
-        sendResponse?.({ ok: true }); return;
-      }
-
-      if (msg?.type === "TAB_SUMMARY_FROM_PANEL") {
-        const { tabId, summary } = msg;
-        const it = tabsIndex.get(tabId);
-        if (it && typeof summary === "string" && summary.trim()) {
-          it.summary = summary;
-          it.updatedAt = Date.now();
-          tabsIndex.set(tabId, it);
-          scheduleBroadcast();
-        }
-        sendResponse?.({ ok: true }); return;
-      }
-
-      if (msg?.type === "TAB_CLASSIFICATION_FROM_PANEL") {
-        const { tabId, categories = [] } = msg;
-        const it = tabsIndex.get(tabId);
-        if (it) {
-          it.categories = Array.isArray(categories) ? categories : [];
-          it.updatedAt = Date.now();
-          tabsIndex.set(tabId, it);
-          scheduleBroadcast();
-        }
         sendResponse?.({ ok: true }); return;
       }
 
@@ -311,7 +508,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   };
 
   run();
-  return false;
+  return true;
 });
 
 // ---------- Kick startup work (NO top-level await) ----------
