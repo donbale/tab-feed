@@ -26,6 +26,25 @@ html, body { margin:0; padding:0; background:var(--bg); color:#e6eefc; font:14px
 }
 .tf-nav button.active { outline:2px solid var(--brand); color:#fff; }
 
+.tf-nav-btn {
+  padding: .32rem .7rem;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--chip);
+  color: #dbe8ff;
+  text-decoration: none;
+}
+
+.tf-nav-btn:hover {
+  background: #1d2b43;
+}
+
+.separator {
+  width: 1px;
+  background-color: var(--border);
+  margin: 0 8px;
+}
+
 .tf-front {
   display:grid;
   grid-template-columns: 1.15fr 1fr 320px;
@@ -90,4 +109,34 @@ html, body { margin:0; padding:0; background:var(--bg); color:#e6eefc; font:14px
   display: flex;
   gap: 8px;
   margin-top: 8px;
+}
+
+.banner {
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  padding: 12px;
+  margin-bottom: 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.banner .meta {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.banner button {
+  background: var(--chip);
+  color: #dbe8ff;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 6px 10px;
+  cursor: pointer;
+  align-self: flex-start;
+}
+
+.banner button:hover {
+  background: #1d2b43;
 }

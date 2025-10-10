@@ -9,6 +9,73 @@ const PANEL_URL   = chrome.runtime.getURL("panel.html");
 const tabsIndex = new Map(); // tabId -> item
 let broadcastTimer = null;
 let saveTimer = null;
+let suggestBundlesTimer = null;
+let suggestedBundles = [];
+let bundles = [];
+
+async function suggestBundles() {
+  const tabs = [...tabsIndex.values()].filter(it => it.fullText && it.fullText.length >= 120);
+  if (tabs.length < 3) {
+    suggestedBundles = [];
+    await saveAndBroadcast();
+    return;
+  }
+
+  const tabCues = tabs.map(t => ({
+    tabId: t.tabId,
+    title: t.title,
+    description: t.description,
+    categories: t.categories,
+  }));
+
+  const existingBundleTitles = bundles.map(b => `- "${b.title}"`).join("\n");
+
+  const systemPrompt = `You are a browser tab organizer. Your task is to group related tabs into thematic bundles.
+- A bundle should contain at least 3 tabs.
+- The title of the bundle should be a short, descriptive summary of the topic (e.g., "React Performance Optimization", "Planning a trip to Japan").
+- Do not suggest bundles that are too similar to the existing bundles listed below.
+- Return a JSON array of bundle objects, where each object has a "title" and a "tabIds" array.
+- If no new bundles can be created, return an empty array.
+
+Existing bundles:
+${existingBundleTitles}`;
+
+  const userPrompt = `Here are the open tabs:\n${JSON.stringify(tabCues, null, 2)}`;
+
+  try {
+    const lm = await getLM();
+    if (!lm) {
+      suggestedBundles = [];
+      await saveAndBroadcast();
+      return;
+    }
+
+    const res = await lm.prompt([{ role: "system", content: systemPrompt }, { role: "user", content: userPrompt }]);
+    let parsed;
+    try {
+      const jsonString = res.replace(/```json\n|```/g, "");
+      parsed = JSON.parse(jsonString);
+    } catch {
+      parsed = [];
+    }
+
+    if (Array.isArray(parsed)) {
+      suggestedBundles = parsed.filter(b => b.title && Array.isArray(b.tabIds) && b.tabIds.length >= 3);
+    } else {
+      suggestedBundles = [];
+    }
+  } catch (e) {
+    console.error("[TabFeed][bg] suggestBundles failed", e);
+    suggestedBundles = [];
+  }
+
+  await saveAndBroadcast();
+}
+
+function scheduleSuggestBundles() {
+  clearTimeout(suggestBundlesTimer);
+  suggestBundlesTimer = setTimeout(suggestBundles, 2000); // 2 second debounce
+}
 
 // ---------- Summarizer (moved from panel.js) ----------
 let summarizerInst = null;
@@ -68,6 +135,7 @@ async function runSummaryQueue() {
       }
     }));
     scheduleSaveAndBroadcast();
+    scheduleSuggestBundles();
   }
   summaryRunning = false;
 }
@@ -140,8 +208,33 @@ async function runClassifyQueue() {
       }
     }));
     scheduleSaveAndBroadcast(); // Broadcast after each batch
+    scheduleSuggestBundles();
   }
   classifyRunning = false;
+}
+
+async function generateBundleSummaryAndTips(bundle) {
+  const tabs = bundle.tabIds.map(id => tabsIndex.get(id)).filter(Boolean);
+  const context = tabs.map(t => `Title: ${t.title}\nURL: ${t.url}\nSummary: ${t.summary}\n`).join("\n---\n");
+
+  const summaryPrompt = `Summarize the following content from a bundle of tabs:\n${context}`;
+  const tipsPrompt = `Based on the following content, suggest 3-5 next steps for the user:\n${context}`;
+
+  try {
+    const lm = await getLM();
+    if (!lm) return;
+
+    const summary = await lm.prompt([{ role: "user", content: summaryPrompt }]);
+    const tipsResponse = await lm.prompt([{ role: "user", content: tipsPrompt }]);
+    const tips = tipsResponse.split("\n").map(t => t.replace(/^- /, "")).filter(Boolean);
+
+    bundle.summary = summary;
+    bundle.tips = tips;
+
+    await saveAndBroadcast();
+  } catch (e) {
+    console.error("[TabFeed][bg] generateBundleSummaryAndTips failed", e);
+  }
 }
 
 // ---------- Entity Extraction (moved from panel.js) ----------
@@ -191,6 +284,7 @@ async function runEntitiesQueue() {
       }
     }));
     scheduleSaveAndBroadcast(); // Broadcast after each batch
+    scheduleSuggestBundles();
   }
   entitiesRunning = false;
 }
@@ -253,7 +347,7 @@ async function saveAndBroadcast() {
     .filter(it => it.url && !isOwnTab(it.url))
     .sort(stableSort);
 
-  await chrome.storage.local.set({ tabs: list });
+  await chrome.storage.local.set({ tabs: list, suggestedBundles, bundles });
   chrome.runtime.sendMessage({ type: "TABS_UPDATED" }).catch(() => {});
 }
 
@@ -292,12 +386,16 @@ async function requestParse(tabId) {
 // ---------- Hydrate from storage.local at boot ----------
 async function hydrateFromStorage() {
   try {
-    const { tabs = [] } = await chrome.storage.local.get("tabs");
+    const { tabs = [], bundles: storedBundles = [] } = await chrome.storage.local.get(["tabs", "bundles"]);
     if (Array.isArray(tabs)) {
       for (const it of tabs) {
         if (it.tabId != null) tabsIndex.set(it.tabId, it);
       }
       console.log("[TabFeed][bg] hydrated from storage:", tabs.length, "items");
+    }
+    if (Array.isArray(storedBundles)) {
+      bundles = storedBundles;
+      console.log("[TabFeed][bg] hydrated bundles from storage:", bundles.length, "bundles");
     }
   } catch (e) {
     console.warn("[TabFeed][bg] hydrateFromStorage failed:", e);
@@ -434,8 +532,8 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       }
 
       if (msg?.type === "GET_TABS_NOW") {
-        const { tabs = [] } = await chrome.storage.local.get("tabs");
-        sendResponse?.({ ok: true, tabs }); return;
+        const { tabs = [], suggestedBundles = [], bundles = [] } = await chrome.storage.local.get(["tabs", "suggestedBundles", "bundles"]);
+        sendResponse?.({ ok: true, tabs, suggestedBundles, bundles }); return;
       }
 
       if (msg?.type === "TAB_CONTENT" && sender.tab?.id != null) {
@@ -474,6 +572,57 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
 
         scheduleBroadcast();
         sendResponse?.({ ok: true }); return;
+      }
+
+      if (msg?.type === "ASK_QUESTION") {
+        const { question, bundle } = msg;
+        const tabs = bundle.tabIds.map(id => tabsIndex.get(id)).filter(Boolean);
+        const context = tabs.map(t => `Title: ${t.title}\nURL: ${t.url}\nSummary: ${t.summary}\n`).join("\n---\n");
+
+        const systemPrompt = `You are an expert research assistant. Answer the user's question based on the provided context from the bundled tabs.`;
+        const userPrompt = `Context:\n${context}\n\nQuestion: ${question}`;
+
+        try {
+          const lm = await getLM();
+          if (!lm) {
+            sendResponse?.({ answer: "Sorry, the Language Model is not available." });
+            return;
+          }
+          const answer = await lm.prompt([{ role: "system", content: systemPrompt }, { role: "user", content: userPrompt }]);
+          sendResponse?.({ answer });
+        } catch (e) {
+          console.error("[TabFeed][bg] ASK_QUESTION failed", e);
+          sendResponse?.({ answer: "Sorry, I couldn't answer the question." });
+        }
+        return;
+      }
+
+      if (msg?.type === "GET_BUNDLE") {
+        const bundle = bundles.find(b => b.id === msg.id);
+        if (bundle) {
+          const tabs = bundle.tabIds.map(id => tabsIndex.get(id)).filter(Boolean);
+          sendResponse?.({ ok: true, bundle, tabs });
+        } else {
+          sendResponse?.({ ok: false });
+        }
+        return;
+      }
+
+      if (msg?.type === "CREATE_BUNDLE") {
+        const newBundle = {
+          id: `bundle-${Date.now()}`,
+          title: msg.title,
+          tabIds: msg.tabIds,
+          summary: "",
+          tips: [],
+        };
+        bundles.push(newBundle);
+        suggestedBundles = []; // Clear suggestions
+        await saveAndBroadcast();
+        generateBundleSummaryAndTips(newBundle);
+        scheduleSuggestBundles(); // Re-suggest after creating a bundle
+        sendResponse?.({ ok: true });
+        return;
       }
 
       // ---- panel commands ----

@@ -65,14 +65,13 @@ const CATEGORY_ENUM = [
 
 // ---------- category filter ----------
 let activeFilter = null;
-function renderFilters(items) {
+function renderFilters(items, bundles = []) {
   const countsMap = new Map();
   for (const it of items) {
     const cats = Array.isArray(it.categories) ? it.categories : [];
     for (const c of cats) countsMap.set(c, (countsMap.get(c) || 0) + 1);
   }
   nav.innerHTML = "";
-  if (!countsMap.size) return;
 
   const makeBtn = (label, on, handler) => {
     const b = document.createElement("button");
@@ -84,6 +83,20 @@ function renderFilters(items) {
   for (const c of preferredOrder) {
     nav.appendChild(makeBtn(activeFilter === c ? `${c} ✓` : c, activeFilter === c,
       () => { activeFilter = (activeFilter === c ? null : c); hydrate(); }));
+  }
+
+  if (bundles.length) {
+    const separator = document.createElement("span");
+    separator.className = "separator";
+    nav.appendChild(separator);
+  }
+
+  for (const bundle of bundles) {
+    const btn = document.createElement("a");
+    btn.className = "tf-nav-btn"; // new class for styling
+    btn.textContent = `🗂️ ${bundle.title}`;
+    btn.href = `bundle.html?id=${bundle.id}`;
+    nav.appendChild(btn);
   }
 }
 
@@ -244,19 +257,49 @@ function renderFront(items) {
   for (const it of rail)  elRail.appendChild(card(it));
 }
 
-// ---------- hydrate & filters ----------
-function render(items) {
+function renderSuggestions(suggestedBundles = [], tabsById) {
+  const el = document.getElementById("suggestions");
+  if (!el) return;
+  el.innerHTML = "";
+  if (!suggestedBundles.length) return;
+
+  for (const bundle of suggestedBundles) {
+    const banner = document.createElement("div");
+    banner.className = "banner";
+    const title = document.createElement("div");
+    title.innerHTML = `<strong>It looks like you're working on “${bundle.title}”.</strong>`;
+    const meta = document.createElement("div");
+    meta.className = "meta";
+    const names = bundle.tabIds.map(id => (tabsById.get(id)?.title || "Untitled")).join(" • ");
+    meta.textContent = `${bundle.tabIds.length} tabs match • e.g., ${names}`;
+    const button = document.createElement("button");
+    button.textContent = "Create bundle";
+    button.onclick = () => {
+      chrome.runtime.sendMessage({ type: "CREATE_BUNDLE", ...bundle });
+      el.innerHTML = ""; // Hide suggestions after creating a bundle
+    };
+    banner.appendChild(title);
+    banner.appendChild(meta);
+    banner.appendChild(button);
+    el.appendChild(banner);
+  }
+}
+
+
+
+function render(items, suggestedBundles = [], bundles = []) {
   const anyCats = items.some(it => Array.isArray(it.categories) && it.categories.length);
-  nav.innerHTML = ""; if (anyCats) renderFilters(items);
+  renderFilters(items, bundles);
   if (listGrid) listGrid.hidden = true;
   renderFront(items);
+  renderSuggestions(suggestedBundles, new Map(items.map(t => [t.tabId, t])));
 }
 
 async function fetchTabsFromSW() {
   return new Promise((resolve) => {
     chrome.runtime.sendMessage({ type: "GET_TABS_NOW" }, (res) => {
-      if (res && res.ok && Array.isArray(res.tabs)) {
-        resolve(res.tabs);
+      if (res && res.ok) {
+        resolve(res);
       } else {
         resolve(null);
       }
@@ -266,11 +309,11 @@ async function fetchTabsFromSW() {
 async function hydrate() {
   const sw = await fetchTabsFromSW();
   if (sw) {
-    render(sw);
+    render(sw.tabs || [], sw.suggestedBundles || [], sw.bundles || []);
     return;
   }
-  const { tabs = [] } = await chrome.storage.local.get("tabs");
-  render(Array.isArray(tabs) ? tabs : []);
+  const { tabs = [], suggestedBundles = [], bundles = [] } = await chrome.storage.local.get(["tabs", "suggestedBundles", "bundles"]);
+  render(Array.isArray(tabs) ? tabs : [], Array.isArray(suggestedBundles) ? suggestedBundles : [], Array.isArray(bundles) ? bundles : []);
 }
 
 chrome.runtime.onMessage.addListener((msg) => {
