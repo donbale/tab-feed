@@ -159,6 +159,46 @@ Text: """${snippet}"""`;
   }
 }
 
+
+// ---------- YouTube transcript fetch queue ----------
+let youtubeQueue = [];
+let youtubeAttempts = new Map(); // tabId -> tries
+let youtubeRunning = false;
+async function runYouTubeQueue() {
+  if (youtubeRunning) return;
+  youtubeRunning = true;
+  while (youtubeQueue.length) {
+    const it = youtubeQueue.shift();
+    try {
+      // Only act on YouTube watch pages that lack sufficient fullText
+      if (!isYouTubeWatch(it?.url)) continue;
+      if (it.fullText && it.fullText.length >= 40) continue;
+      const tr = await getYouTubeTranscriptFromTab(it.tabId);
+      if (tr && tr.text) {
+        it.fullText = tr.text;
+        if (it && (tr.source === "captions" || tr.source === "timedtext")) {
+          it.badge = "Transcript";
+        } else if (it) {
+          it.badge = "Video description";
+        }
+        // If we now have enough text, queue for summarization
+        const sig = [(it.url || ""), (it.title || ""), (it.fullText ? it.fullText.length : 0)].join("|");
+        const prevSig = lastSummarizedSig.get(it.tabId);
+        if ((!it.summary) && it.fullText && it.fullText.length >= 40 && prevSig !== sig) {
+          summaryQueue.push(it);
+          lastSummarizedSig.set(it.tabId, sig);
+        } else {
+          scheduleYouTubeRetry(it);
+        }
+      } else {
+        scheduleYouTubeRetry(it);
+      }
+    } catch (e) {
+      console.warn("YT transcript fetch failed:", e);
+    }
+  }
+  youtubeRunning = false;
+}
 // ---------- queues ----------
 const lastSummarizedSig = new Map(); // tabId -> sig
 
@@ -184,7 +224,7 @@ async function runClassifyQueue() {
   classifyRunning = true;
   while (classifyQueue.length) {
     const it = classifyQueue.shift();
-    if (!(it.fullText && it.fullText.length >= 120)) continue;
+    if (!(it.fullText && it.fullText.length >= 40)) continue;
     if (Array.isArray(it.categories) && it.categories.length) continue;
     const result = await classifyTabContent(it.fullText, it.url, it.title, it.description);
     if (result && result.categories) {
@@ -201,7 +241,7 @@ async function runEntitiesQueue() {
   entitiesRunning = true;
   while (entitiesQueue.length) {
     const it = entitiesQueue.shift();
-    if (!(it.fullText && it.fullText.length >= 120)) continue;
+    if (!(it.fullText && it.fullText.length >= 40)) continue;
     if (it.entities && (it.entities.people?.length || it.entities.orgs?.length || it.entities.places?.length)) continue;
     const ents = await extractEntities(it.fullText, it.url, it.title, it.description);
     if (ents) {
@@ -365,16 +405,21 @@ function card(it, { variant="standard" } = {}) {
   if (it.summary) {
     sum.textContent = mdToText(it.summary);
     lastSummarizedSig.set(it.tabId, sig);
-  } else if (it.fullText && it.fullText.length >= 120) {
+  } else if (it.fullText && it.fullText.length >= 40) {
     sum.textContent = "Generating TL;DR…";
     if (prevSig !== sig) {
       summaryQueue.push(it);
       lastSummarizedSig.set(it.tabId, sig);
     }
   } else if (it.fullText) {
-    sum.textContent = "Not enough text yet…";
+    sum.textContent = "Summarizing short clip…";
+    if (!it.summary) { summaryQueue.push(it); }
   } else {
-    sum.textContent = "No article text extracted yet.";
+    if (isYouTubeWatch(it.url)) {
+      sum.textContent = "Fetching transcript…";
+    } else {
+      sum.textContent = "No article text extracted yet.";
+    }
   }
   el.appendChild(sum);
 
@@ -382,10 +427,13 @@ function card(it, { variant="standard" } = {}) {
 
   // Queue AI jobs if needed
   if ((!Array.isArray(it.categories) || it.categories.length === 0) &&
-      it.fullText && it.fullText.length >= 120) {
+      it.fullText && it.fullText.length >= 40) {
     classifyQueue.push(it);
   }
-  if (it.fullText && it.fullText.length >= 120 &&
+  if (isYouTubeWatch(it.url) && (!it.fullText || it.fullText.length < 120) && !it.summary) {
+    youtubeQueue.push(it);
+  }
+  if (it.fullText && it.fullText.length >= 40 &&
       !(it.entities && (it.entities.people?.length || it.entities.orgs?.length || it.entities.places?.length))) {
     entitiesQueue.push(it);
   }
@@ -414,6 +462,7 @@ function renderFront(items) {
 
   runClassifyQueue();
   runEntitiesQueue();
+  runYouTubeQueue();
   runSummaryQueue();
 }
 
@@ -451,9 +500,50 @@ document.getElementById("classifyAll")?.addEventListener("click", async (e) => {
   e.stopPropagation();
   const { tabs = [] } = await chrome.storage.local.get("tabs");
   for (const it of tabs) {
-    if (it.fullText && it.fullText.length >= 120 && (!it.categories || !it.categories.length)) {
+    if (isYouTubeWatch(it.url) && (!it.fullText || it.fullText.length < 120) && !it.summary) {
+    youtubeQueue.push(it);
+  }
+  if (it.fullText && it.fullText.length >= 40 && (!it.categories || !it.categories.length)) {
       classifyQueue.push(it);
     }
   }
   runClassifyQueue();
 });
+
+
+
+// ===== YouTube transcript helpers =====
+const YT_WATCH_RE = /^https?:\/\/(www\.)?youtube\.com\/watch\?/i;
+function isYouTubeWatch(url) { return YT_WATCH_RE.test(url || ""); }
+async function getYouTubeTranscriptFromTab(tabId) {
+  await chrome.scripting.executeScript({ target: { tabId }, files: ["cs_youtube.js"], world: 'MAIN' });
+  const [{ result }] = await chrome.scripting.executeScript({ target: { tabId }, world: 'MAIN', func: () => window.__collectYTTranscript && window.__collectYTTranscript() });
+  return result;
+}
+// Optional: chunk long transcripts and summarize progressively with on-device Summarizer if available.
+async function summarizeLong(text) {
+  if (!text) return "";
+  if (!("Summarizer" in self)) return text.slice(0, 1500);
+  const s = await Summarizer.create({ type: "key-points", format: "markdown" });
+  if (text.length <= 20000) return await s.summarize(text);
+  const chunks = []; const size = 16000;
+  for (let i = 0; i < text.length; i += size) chunks.push(text.slice(i, i + size));
+  const partials = [];
+  for (const c of chunks) partials.push(await s.summarize(c));
+  return await s.summarize(partials.join("\\n\\n"));
+}
+// ===== End YouTube helpers =====
+
+
+/* --- Auto-retry helper for YouTube transcript --- */
+
+// (deduped) youtubeAttempts declaration removed
+ // tabId -> tries
+function scheduleYouTubeRetry(it) {
+  const tries = (youtubeAttempts.get(it.tabId) || 0) + 1;
+  youtubeAttempts.set(it.tabId, tries);
+  if (tries < 3) {
+    // Requeue after a short delay
+    setTimeout(() => { youtubeQueue.push(it); runYouTubeQueue(); }, 1200 * tries);
+  }
+}
