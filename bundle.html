@@ -1,0 +1,33 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8"/>
+  <meta name="viewport" content="width=device-width,initial-scale=1"/>
+  <title>Bundle</title>
+  <link rel="stylesheet" href="bundle.css"/>
+</head>
+<body>
+  <div class="wrap">
+    <aside>
+      <a href="panel.html" class="back-link">← Back to all tabs</a>
+      <h1 id="bTitle">Bundle</h1>
+      <div class="meta" id="bMeta">—</div>
+      <div class="list" id="bTabs"></div>
+      <div class="row">
+        <button id="reSmz">Re-summarize</button>
+        <button id="del">Delete</button>
+      </div>
+    </aside>
+    <main>
+      <div class="summary" id="bSummary">Loading…</div>
+      <div class="tips" id="bTips"></div>
+      <div class="row">
+        <input id="ask" type="text" placeholder="Ask about this bundle…"/>
+        <button id="askBtn">Ask</button>
+      </div>
+      <div id="answer" class="summary" style="margin-top:8px;color:#bcd4ff;"></div>
+    </main>
+  </div>
+  <script src="bundle.js"></script>
+</body>
+</html>

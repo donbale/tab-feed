@@ -1,0 +1,139 @@
+:root {
+  --bg: #0b1220;
+  --card: #151e2e;
+  --muted: #9fb0c9;
+  --border: #25334a;
+  --chip: #213047;
+  --brand: #f4d35e;
+}
+
+* { box-sizing: border-box; }
+html, body { margin:0; padding:0; background:var(--bg); color:#e6eefc; font:14px/1.45 system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial; }
+
+.wrap {
+  display: grid;
+  grid-template-columns: 320px 1fr;
+  gap: 14px;
+  padding: 14px;
+}
+
+aside {
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  padding: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+main {
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  padding: 16px;
+  min-height: 70vh;
+}
+
+h1 {
+  margin: 0 0 6px;
+  font-size: 18px;
+}
+
+.meta {
+  color: var(--muted);
+  font-size: 12px;
+  margin-bottom: 8px;
+}
+
+.chip {
+  background: var(--chip);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  padding: 4px 8px;
+  font-size: 12px;
+  color: #cfe2ff;
+  text-decoration: none;
+}
+
+.list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  overflow: auto;
+  max-height: calc(100vh - 140px);
+}
+
+.summary {
+  white-space: pre-wrap;
+  font-size: 14px;
+  color: #d8e6ff;
+}
+
+.tips {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+  margin: 10px 0;
+}
+
+.row {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  margin-top: 12px;
+}
+
+button {
+  background: #1a2a44;
+  border: 1px solid #2a3a58;
+  color: #d9e6ff;
+  border-radius: 10px;
+  padding: 6px 10px;
+  cursor: pointer;
+}
+
+input[type="text"] {
+  flex: 1;
+  background: #0b121e;
+  border: 1px solid #20304a;
+  color: #dbe6ff;
+  border-radius: 8px;
+  padding: 8px;
+}
+
+@media (max-width: 900px) {
+  .wrap {
+    grid-template-columns: 1fr;
+  }
+}
+
+.back-link {
+  color: var(--muted);
+  text-decoration: none;
+  font-size: 12px;
+  margin-bottom: 10px;
+}
+
+.back-link:hover {
+  color: var(--accent);
+}
+
+.tab-link {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px;
+  border-radius: 8px;
+  text-decoration: none;
+  color: var(--text);
+}
+
+.tab-link:hover {
+  background-color: var(--chip);
+}
+
+.favicon {
+  width: 16px;
+  height: 16px;
+}

@@ -8,6 +8,288 @@ const PANEL_URL   = chrome.runtime.getURL("panel.html");
 // ---------- State ----------
 const tabsIndex = new Map(); // tabId -> item
 let broadcastTimer = null;
+let saveTimer = null;
+let suggestBundlesTimer = null;
+let suggestedBundles = [];
+let bundles = [];
+
+async function suggestBundles() {
+  const tabs = [...tabsIndex.values()].filter(it => it.fullText && it.fullText.length >= 120);
+  if (tabs.length < 3) {
+    suggestedBundles = [];
+    await saveAndBroadcast();
+    return;
+  }
+
+  const tabCues = tabs.map(t => ({
+    tabId: t.tabId,
+    title: t.title,
+    description: t.description,
+    categories: t.categories,
+  }));
+
+  const existingBundleTitles = bundles.map(b => `- "${b.title}"`).join("\n");
+
+  const systemPrompt = `You are a browser tab organizer. Your task is to group related tabs into thematic bundles.
+- A bundle should contain at least 3 tabs.
+- The title of the bundle should be a short, descriptive summary of the topic (e.g., "React Performance Optimization", "Planning a trip to Japan").
+- Do not suggest bundles that are too similar to the existing bundles listed below.
+- Return a JSON array of bundle objects, where each object has a "title" and a "tabIds" array.
+- If no new bundles can be created, return an empty array.
+
+Existing bundles:
+${existingBundleTitles}`;
+
+  const userPrompt = `Here are the open tabs:\n${JSON.stringify(tabCues, null, 2)}`;
+
+  try {
+    const lm = await getLM();
+    if (!lm) {
+      suggestedBundles = [];
+      await saveAndBroadcast();
+      return;
+    }
+
+    const res = await lm.prompt([{ role: "system", content: systemPrompt }, { role: "user", content: userPrompt }]);
+    let parsed;
+    try {
+      const jsonString = res.replace(/```json\n|```/g, "");
+      parsed = JSON.parse(jsonString);
+    } catch {
+      parsed = [];
+    }
+
+    if (Array.isArray(parsed)) {
+      suggestedBundles = parsed.filter(b => b.title && Array.isArray(b.tabIds) && b.tabIds.length >= 3);
+    } else {
+      suggestedBundles = [];
+    }
+  } catch (e) {
+    console.error("[TabFeed][bg] suggestBundles failed", e);
+    suggestedBundles = [];
+  }
+
+  await saveAndBroadcast();
+}
+
+function scheduleSuggestBundles() {
+  clearTimeout(suggestBundlesTimer);
+  suggestBundlesTimer = setTimeout(suggestBundles, 2000); // 2 second debounce
+}
+
+// ---------- Summarizer (moved from panel.js) ----------
+let summarizerInst = null;
+async function getSummarizer() {
+  try {
+    const API = globalThis.Summarizer || (globalThis.ai && globalThis.ai.summarizer);
+    if (!API) return null;
+    const caps = API.capabilities ? await API.capabilities() : await API.availability?.();
+    if (!caps || caps.available === "no") return null;
+    if (!summarizerInst) {
+      summarizerInst = await API.create({
+        type: "key-points",
+        length: "short",
+        format: "markdown",
+        output: { language: "en" }
+      });
+    }
+    return summarizerInst;
+  } catch (e) {
+    console.error("[TabFeed][bg] getSummarizer failed", e);
+    return null;
+  }
+}
+async function summarizeMD(text) {
+  const inst = await getSummarizer();
+  if (!inst) return null;
+  try {
+    const out = await inst.summarize((text || "").slice(0, 1000), {
+      format: "markdown",
+      output: { language: "en" }
+    });
+    return typeof out === "string" ? out : (out?.summary || "");
+  } catch (e) {
+    console.warn("[TabFeed] Summarize failed", e);
+    return null;
+  }
+}
+
+const lastSummarizedSig = new Map(); // tabId -> sig
+let summaryQueue = [];
+let summaryRunning = false;
+const MAX_CONCURRENT_SUMMARIES = 5;
+async function runSummaryQueue() {
+  if (summaryRunning) return;
+  summaryRunning = true;
+  while (summaryQueue.length > 0) {
+    const itemsToProcess = summaryQueue.splice(0, MAX_CONCURRENT_SUMMARIES);
+    await Promise.all(itemsToProcess.map(async (it) => {
+      const md = await summarizeMD(it.fullText);
+      if (md) {
+        const tab = tabsIndex.get(it.tabId);
+        if (tab) {
+          tab.summary = md;
+          tab.updatedAt = Date.now();
+          tabsIndex.set(it.tabId, tab);
+        }
+      }
+    }));
+    scheduleSaveAndBroadcast();
+    scheduleSuggestBundles();
+  }
+  summaryRunning = false;
+}
+
+// ---------- Classification (moved from panel.js) ----------
+async function getLM() {
+  try {
+    const LM = globalThis.LanguageModel || (globalThis.ai && globalThis.ai.languageModel);
+    if (!LM) return null;
+    const session = await LM.create?.({
+      expectedInputs:  [{ type: "text", languages: ["en"] }],
+      expectedOutputs: [{ type: "text", languages: ["en"] }]
+    });
+    return session || null;
+  } catch (e) {
+    console.error("[TabFeed][bg] getLM failed", e);
+    return null;
+  }
+}
+
+const CATEGORY_ENUM = [
+  "News","Technology","Developer Docs","Research","Video","Social",
+  "Shopping","Entertainment","Finance","Sports","Productivity","Other"
+];
+
+async function classifyTabContent(fullText, url, title, description) {
+  const lm = await getLM();
+  if (!lm) return null;
+  const domain = (() => { try { return new URL(url).hostname.replace(/^www\./,""); } catch { return ""; }})();
+  const text = (fullText || description || title || "").slice(0, 1000);
+
+  const systemPrompt = `You are a browser tab classifier.
+Choose up to 3 categories from: ${CATEGORY_ENUM.join(", ")}.
+Return ONLY a JSON array of strings, e.g. ["News","Technology"].`;
+  const userPrompt = `Domain: ${domain}
+Title: ${title || ""}
+Description: ${description || ""}
+Text: """${text}"""`;
+
+  try {
+    const res = await lm.prompt([{ role: "system", content: systemPrompt }, { role: "user", content: userPrompt }]);
+    let parsed; try { parsed = JSON.parse(res); } catch {}
+    if (!Array.isArray(parsed)) parsed = ["Other"];
+    const clean = parsed.map(s => String(s).trim()).filter(s => CATEGORY_ENUM.includes(s)).slice(0,3);
+    return { categories: clean.length ? clean : ["Other"] };
+  } catch (e) {
+    console.warn("[TabFeed][panel] classify failed:", e);
+    return null;
+  }
+}
+
+let classifyQueue = [];
+let classifyRunning = false;
+async function runClassifyQueue() {
+  if (classifyRunning) return;
+  classifyRunning = true;
+  while (classifyQueue.length > 0) {
+    const itemsToProcess = classifyQueue.splice(0, 5); // Process in batches of 5
+    await Promise.all(itemsToProcess.map(async (it) => {
+      if (!(it.fullText && it.fullText.length >= 120)) return;
+      if (Array.isArray(it.categories) && it.categories.length) return;
+      const result = await classifyTabContent(it.fullText, it.url, it.title, it.description);
+      if (result && result.categories) {
+        const tab = tabsIndex.get(it.tabId);
+        if (tab) {
+          tab.categories = result.categories;
+          tab.updatedAt = Date.now();
+          tabsIndex.set(it.tabId, tab);
+        }
+      }
+    }));
+    scheduleSaveAndBroadcast(); // Broadcast after each batch
+    scheduleSuggestBundles();
+  }
+  classifyRunning = false;
+}
+
+async function generateBundleSummaryAndTips(bundle) {
+  const tabs = bundle.tabIds.map(id => tabsIndex.get(id)).filter(Boolean);
+  const context = tabs.map(t => `Title: ${t.title}\nURL: ${t.url}\nSummary: ${t.summary}\n`).join("\n---\n");
+
+  const summaryPrompt = `Summarize the following content from a bundle of tabs:\n${context}`;
+  const tipsPrompt = `Based on the following content, suggest 3-5 next steps for the user:\n${context}`;
+
+  try {
+    const lm = await getLM();
+    if (!lm) return;
+
+    const summary = await lm.prompt([{ role: "user", content: summaryPrompt }]);
+    const tipsResponse = await lm.prompt([{ role: "user", content: tipsPrompt }]);
+    const tips = tipsResponse.split("\n").map(t => t.replace(/^- /, "")).filter(Boolean);
+
+    bundle.summary = summary;
+    bundle.tips = tips;
+
+    await saveAndBroadcast();
+  } catch (e) {
+    console.error("[TabFeed][bg] generateBundleSummaryAndTips failed", e);
+  }
+}
+
+// ---------- Entity Extraction (moved from panel.js) ----------
+async function extractEntities(fullText, url, title, description) {
+  const lm = await getLM();
+  if (!lm) return null;
+
+  const snippet = (fullText || description || title || "").slice(0, 1200);
+  const system = `Extract named entities from a news/article snippet.
+Return STRICT JSON: {"people":[...], "orgs":[...], "places":[...]}
+- Each list: 0-6 short strings
+- No commentary. JSON only.`;
+  const user = `Title: ${title || ""}
+URL: ${url || ""}
+Text: """${snippet}"""`;
+
+  try {
+    const out = await lm.prompt([{ role: "system", content: system }, { role: "user", content: user }]);
+    let obj; try { obj = JSON.parse(out); } catch {}
+    if (!obj) return null;
+    const norm = (arr) => (Array.isArray(arr) ? arr.map(s => String(s).trim()).filter(Boolean).slice(0,6) : []);
+    return { people: norm(obj.people), orgs: norm(obj.orgs), places: norm(obj.places) };
+  } catch (e) {
+    console.warn("[TabFeed][panel] entities failed:", e);
+    return null;
+  }
+}
+
+let entitiesQueue = [];
+let entitiesRunning = false;
+async function runEntitiesQueue() {
+  if (entitiesRunning) return;
+  entitiesRunning = true;
+  while (entitiesQueue.length > 0) {
+    const itemsToProcess = entitiesQueue.splice(0, 5); // Process in batches of 5
+    await Promise.all(itemsToProcess.map(async (it) => {
+      if (!(it.fullText && it.fullText.length >= 120)) return;
+      if (it.entities && (it.entities.people?.length || it.entities.orgs?.length || it.entities.places?.length)) return;
+      const ents = await extractEntities(it.fullText, it.url, it.title, it.description);
+      if (ents) {
+        const tab = tabsIndex.get(it.tabId);
+        if (tab) {
+          tab.entities = ents;
+          tab.updatedAt = Date.now();
+          tabsIndex.set(it.tabId, tab);
+        }
+      }
+    }));
+    scheduleSaveAndBroadcast(); // Broadcast after each batch
+    scheduleSuggestBundles();
+  }
+  entitiesRunning = false;
+}
+
+
 
 // ---------- Helpers ----------
 function isOwnTab(tabOrUrl) {
@@ -65,8 +347,13 @@ async function saveAndBroadcast() {
     .filter(it => it.url && !isOwnTab(it.url))
     .sort(stableSort);
 
-  await chrome.storage.local.set({ tabs: list });
+  await chrome.storage.local.set({ tabs: list, suggestedBundles, bundles });
   chrome.runtime.sendMessage({ type: "TABS_UPDATED" }).catch(() => {});
+}
+
+function scheduleSaveAndBroadcast() {
+  clearTimeout(saveTimer);
+  saveTimer = setTimeout(saveAndBroadcast, 1000);
 }
 
 async function reconcileAndBroadcast() {
@@ -89,7 +376,7 @@ async function reconcileAndBroadcast() {
 
 function scheduleBroadcast() {
   clearTimeout(broadcastTimer);
-  broadcastTimer = setTimeout(() => { reconcileAndBroadcast(); }, 80);
+  broadcastTimer = setTimeout(() => { reconcileAndBroadcast(); }, 500);
 }
 
 async function requestParse(tabId) {
@@ -99,12 +386,16 @@ async function requestParse(tabId) {
 // ---------- Hydrate from storage.local at boot ----------
 async function hydrateFromStorage() {
   try {
-    const { tabs = [] } = await chrome.storage.local.get("tabs");
+    const { tabs = [], bundles: storedBundles = [] } = await chrome.storage.local.get(["tabs", "bundles"]);
     if (Array.isArray(tabs)) {
       for (const it of tabs) {
         if (it.tabId != null) tabsIndex.set(it.tabId, it);
       }
       console.log("[TabFeed][bg] hydrated from storage:", tabs.length, "items");
+    }
+    if (Array.isArray(storedBundles)) {
+      bundles = storedBundles;
+      console.log("[TabFeed][bg] hydrated bundles from storage:", bundles.length, "bundles");
     }
   } catch (e) {
     console.warn("[TabFeed][bg] hydrateFromStorage failed:", e);
@@ -241,8 +532,8 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       }
 
       if (msg?.type === "GET_TABS_NOW") {
-        const { tabs = [] } = await chrome.storage.local.get("tabs");
-        sendResponse?.({ ok: true, tabs }); return;
+        const { tabs = [], suggestedBundles = [], bundles = [] } = await chrome.storage.local.get(["tabs", "suggestedBundles", "bundles"]);
+        sendResponse?.({ ok: true, tabs, suggestedBundles, bundles }); return;
       }
 
       if (msg?.type === "TAB_CONTENT" && sender.tab?.id != null) {
@@ -251,32 +542,87 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         const prev = tabsIndex.get(t.id) || {};
         const merged = mergePayload(toItemFromTab(t, prev), msg.payload || {});
         tabsIndex.set(t.id, merged);
+
+        // Summarize if needed
+        const sig = [(merged.url || ""), (merged.title || ""), (merged.fullText ? merged.fullText.length : 0)].join("|");
+        const prevSig = lastSummarizedSig.get(t.id);
+        if (merged.fullText && merged.fullText.length >= 120 && prevSig !== sig) {
+          console.log(`[TabFeed][bg] Queuing summary for tab ${t.id}`);
+          summaryQueue.push(merged);
+          lastSummarizedSig.set(t.id, sig);
+          runSummaryQueue();
+        }
+
+        // Classify if needed
+        if ((!Array.isArray(merged.categories) || merged.categories.length === 0) &&
+            merged.fullText && merged.fullText.length >= 120) {
+          // Check if the tab is already in the queue
+          if (!classifyQueue.some(item => item.tabId === merged.tabId)) {
+            classifyQueue.push(merged);
+          }
+          runClassifyQueue();
+        }
+
+        // Extract entities if needed
+        if (merged.fullText && merged.fullText.length >= 120 &&
+            !(merged.entities && (merged.entities.people?.length || merged.entities.orgs?.length || merged.entities.places?.length))) {
+          entitiesQueue.push(merged);
+          runEntitiesQueue();
+        }
+
         scheduleBroadcast();
         sendResponse?.({ ok: true }); return;
       }
 
-      if (msg?.type === "TAB_SUMMARY_FROM_PANEL") {
-        const { tabId, summary } = msg;
-        const it = tabsIndex.get(tabId);
-        if (it && typeof summary === "string" && summary.trim()) {
-          it.summary = summary;
-          it.updatedAt = Date.now();
-          tabsIndex.set(tabId, it);
-          scheduleBroadcast();
+      if (msg?.type === "ASK_QUESTION") {
+        const { question, bundle } = msg;
+        const tabs = bundle.tabIds.map(id => tabsIndex.get(id)).filter(Boolean);
+        const context = tabs.map(t => `Title: ${t.title}\nURL: ${t.url}\nSummary: ${t.summary}\n`).join("\n---\n");
+
+        const systemPrompt = `You are an expert research assistant. Answer the user's question based on the provided context from the bundled tabs.`;
+        const userPrompt = `Context:\n${context}\n\nQuestion: ${question}`;
+
+        try {
+          const lm = await getLM();
+          if (!lm) {
+            sendResponse?.({ answer: "Sorry, the Language Model is not available." });
+            return;
+          }
+          const answer = await lm.prompt([{ role: "system", content: systemPrompt }, { role: "user", content: userPrompt }]);
+          sendResponse?.({ answer });
+        } catch (e) {
+          console.error("[TabFeed][bg] ASK_QUESTION failed", e);
+          sendResponse?.({ answer: "Sorry, I couldn't answer the question." });
         }
-        sendResponse?.({ ok: true }); return;
+        return;
       }
 
-      if (msg?.type === "TAB_CLASSIFICATION_FROM_PANEL") {
-        const { tabId, categories = [] } = msg;
-        const it = tabsIndex.get(tabId);
-        if (it) {
-          it.categories = Array.isArray(categories) ? categories : [];
-          it.updatedAt = Date.now();
-          tabsIndex.set(tabId, it);
-          scheduleBroadcast();
+      if (msg?.type === "GET_BUNDLE") {
+        const bundle = bundles.find(b => b.id === msg.id);
+        if (bundle) {
+          const tabs = bundle.tabIds.map(id => tabsIndex.get(id)).filter(Boolean);
+          sendResponse?.({ ok: true, bundle, tabs });
+        } else {
+          sendResponse?.({ ok: false });
         }
-        sendResponse?.({ ok: true }); return;
+        return;
+      }
+
+      if (msg?.type === "CREATE_BUNDLE") {
+        const newBundle = {
+          id: `bundle-${Date.now()}`,
+          title: msg.title,
+          tabIds: msg.tabIds,
+          summary: "",
+          tips: [],
+        };
+        bundles.push(newBundle);
+        suggestedBundles = []; // Clear suggestions
+        await saveAndBroadcast();
+        generateBundleSummaryAndTips(newBundle);
+        scheduleSuggestBundles(); // Re-suggest after creating a bundle
+        sendResponse?.({ ok: true });
+        return;
       }
 
       // ---- panel commands ----
@@ -311,7 +657,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   };
 
   run();
-  return false;
+  return true;
 });
 
 // ---------- Kick startup work (NO top-level await) ----------

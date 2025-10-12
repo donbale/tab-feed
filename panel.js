@@ -1,4 +1,4 @@
-// panel.js — Front Page + Summarizer + Prompt classification + Entities + Reading-time badges
+// panel.js — Front Page + Reading-time badges
 
 const counts = document.getElementById("counts");
 const elHero  = document.getElementById("region-hero");
@@ -58,169 +58,20 @@ function buildRelatedQuery(it) {
   return `https://www.google.com/search?q=${encodeURIComponent(q)}`;
 }
 
-// ---------- Summarizer ----------
-let summarizerInst = null;
-async function getSummarizer() {
-  try {
-    const API = globalThis.Summarizer || (globalThis.ai && globalThis.ai.summarizer);
-    if (!API) return null;
-    const caps = API.capabilities ? await API.capabilities() : await API.availability?.();
-    if (!caps || caps.available === "no") return null;
-    if (!summarizerInst) {
-      summarizerInst = await API.create({
-        type: "key-points",
-        length: "short",
-        format: "markdown",
-        output: { language: "en" }
-      });
-    }
-    return summarizerInst;
-  } catch { return null; }
-}
-async function summarizeMD(text) {
-  const inst = await getSummarizer();
-  if (!inst) return null;
-  try {
-    const out = await inst.summarize((text || "").slice(0, 4000), {
-      format: "markdown",
-      output: { language: "en" }
-    });
-    return typeof out === "string" ? out : (out?.summary || "");
-  } catch { return null; }
-}
-
-// ---------- Prompt API (LanguageModel) ----------
-async function getLM() {
-  try {
-    const LM = globalThis.LanguageModel || (globalThis.ai && globalThis.ai.languageModel);
-    if (!LM) return null;
-    const session = await LM.create?.({
-      expectedInputs:  [{ type: "text", languages: ["en"] }],
-      expectedOutputs: [{ type: "text", languages: ["en"] }]
-    });
-    return session || null;
-  } catch { return null; }
-}
-
 const CATEGORY_ENUM = [
   "News","Technology","Developer Docs","Research","Video","Social",
   "Shopping","Entertainment","Finance","Sports","Productivity","Other"
 ];
 
-async function classifyTabContent(fullText, url, title, description) {
-  const lm = await getLM();
-  if (!lm) return null;
-  const domain = (() => { try { return new URL(url).hostname.replace(/^www\./,""); } catch { return ""; }})();
-  const text = (fullText || description || title || "").slice(0, 1000);
-
-  const systemPrompt = `You are a browser tab classifier.
-Choose up to 3 categories from: ${CATEGORY_ENUM.join(", ")}.
-Return ONLY a JSON array of strings, e.g. ["News","Technology"].`;
-  const userPrompt = `Domain: ${domain}
-Title: ${title || ""}
-Description: ${description || ""}
-Text: """${text}"""`;
-
-  try {
-    const res = await lm.prompt([{ role: "system", content: systemPrompt }, { role: "user", content: userPrompt }]);
-    let parsed; try { parsed = JSON.parse(res); } catch {}
-    if (!Array.isArray(parsed)) parsed = ["Other"];
-    const clean = parsed.map(s => String(s).trim()).filter(s => CATEGORY_ENUM.includes(s)).slice(0,3);
-    return { categories: clean.length ? clean : ["Other"] };
-  } catch (e) {
-    console.warn("[TabFeed][panel] classify failed:", e);
-    return null;
-  }
-}
-
-// ---------- Entities (Prompt API) ----------
-async function extractEntities(fullText, url, title, description) {
-  const lm = await getLM();
-  if (!lm) return null;
-
-  const snippet = (fullText || description || title || "").slice(0, 1200);
-  const system = `Extract named entities from a news/article snippet.
-Return STRICT JSON: {"people":[...], "orgs":[...], "places":[...]}
-- Each list: 0-6 short strings
-- No commentary. JSON only.`;
-  const user = `Title: ${title || ""}
-URL: ${url || ""}
-Text: """${snippet}"""`;
-
-  try {
-    const out = await lm.prompt([{ role: "system", content: system }, { role: "user", content: user }]);
-    let obj; try { obj = JSON.parse(out); } catch {}
-    if (!obj) return null;
-    const norm = (arr) => (Array.isArray(arr) ? arr.map(s => String(s).trim()).filter(Boolean).slice(0,6) : []);
-    return { people: norm(obj.people), orgs: norm(obj.orgs), places: norm(obj.places) };
-  } catch (e) {
-    console.warn("[TabFeed][panel] entities failed:", e);
-    return null;
-  }
-}
-
-// ---------- queues ----------
-const lastSummarizedSig = new Map(); // tabId -> sig
-
-let summaryQueue = [];
-let summaryRunning = false;
-async function runSummaryQueue() {
-  if (summaryRunning) return;
-  summaryRunning = true;
-  while (summaryQueue.length) {
-    const it = summaryQueue.shift();
-    const md = await summarizeMD(it.fullText);
-    if (md) {
-      chrome.runtime.sendMessage({ type: "TAB_SUMMARY_FROM_PANEL", tabId: it.tabId, summary: md }).catch(() => {});
-    }
-  }
-  summaryRunning = false;
-}
-
-let classifyQueue = [];
-let classifyRunning = false;
-async function runClassifyQueue() {
-  if (classifyRunning) return;
-  classifyRunning = true;
-  while (classifyQueue.length) {
-    const it = classifyQueue.shift();
-    if (!(it.fullText && it.fullText.length >= 120)) continue;
-    if (Array.isArray(it.categories) && it.categories.length) continue;
-    const result = await classifyTabContent(it.fullText, it.url, it.title, it.description);
-    if (result && result.categories) {
-      chrome.runtime.sendMessage({ type: "TAB_CLASSIFICATION_FROM_PANEL", tabId: it.tabId, categories: result.categories }).catch(() => {});
-    }
-  }
-  classifyRunning = false;
-}
-
-let entitiesQueue = [];
-let entitiesRunning = false;
-async function runEntitiesQueue() {
-  if (entitiesRunning) return;
-  entitiesRunning = true;
-  while (entitiesQueue.length) {
-    const it = entitiesQueue.shift();
-    if (!(it.fullText && it.fullText.length >= 120)) continue;
-    if (it.entities && (it.entities.people?.length || it.entities.orgs?.length || it.entities.places?.length)) continue;
-    const ents = await extractEntities(it.fullText, it.url, it.title, it.description);
-    if (ents) {
-      chrome.runtime.sendMessage({ type: "TAB_ENTITIES_FROM_PANEL", tabId: it.tabId, entities: ents }).catch(() => {});
-    }
-  }
-  entitiesRunning = false;
-}
-
 // ---------- category filter ----------
 let activeFilter = null;
-function renderFilters(items) {
+function renderFilters(items, bundles = []) {
   const countsMap = new Map();
   for (const it of items) {
     const cats = Array.isArray(it.categories) ? it.categories : [];
     for (const c of cats) countsMap.set(c, (countsMap.get(c) || 0) + 1);
   }
   nav.innerHTML = "";
-  if (!countsMap.size) return;
 
   const makeBtn = (label, on, handler) => {
     const b = document.createElement("button");
@@ -232,6 +83,20 @@ function renderFilters(items) {
   for (const c of preferredOrder) {
     nav.appendChild(makeBtn(activeFilter === c ? `${c} ✓` : c, activeFilter === c,
       () => { activeFilter = (activeFilter === c ? null : c); hydrate(); }));
+  }
+
+  if (bundles.length) {
+    const separator = document.createElement("span");
+    separator.className = "separator";
+    nav.appendChild(separator);
+  }
+
+  for (const bundle of bundles) {
+    const btn = document.createElement("a");
+    btn.className = "tf-nav-btn"; // new class for styling
+    btn.textContent = `🗂️ ${bundle.title}`;
+    btn.href = `bundle.html?id=${bundle.id}`;
+    nav.appendChild(btn);
   }
 }
 
@@ -355,22 +220,11 @@ function card(it, { variant="standard" } = {}) {
   // Summary (with content-signature requeue)
   const sum = document.createElement("div");
   sum.className = "summary";
-  const sig = [(it.url || ""), (it.title || ""), (it.fullText ? it.fullText.length : 0)].join("|");
-  const prevSig = lastSummarizedSig.get(it.tabId);
-
-  if (prevSig && prevSig !== sig) {
-    // background should have invalidated summary; show pending
-  }
 
   if (it.summary) {
     sum.textContent = mdToText(it.summary);
-    lastSummarizedSig.set(it.tabId, sig);
   } else if (it.fullText && it.fullText.length >= 120) {
     sum.textContent = "Generating TL;DR…";
-    if (prevSig !== sig) {
-      summaryQueue.push(it);
-      lastSummarizedSig.set(it.tabId, sig);
-    }
   } else if (it.fullText) {
     sum.textContent = "Not enough text yet…";
   } else {
@@ -379,16 +233,6 @@ function card(it, { variant="standard" } = {}) {
   el.appendChild(sum);
 
   el.appendChild(actionsBar(it));
-
-  // Queue AI jobs if needed
-  if ((!Array.isArray(it.categories) || it.categories.length === 0) &&
-      it.fullText && it.fullText.length >= 120) {
-    classifyQueue.push(it);
-  }
-  if (it.fullText && it.fullText.length >= 120 &&
-      !(it.entities && (it.entities.people?.length || it.entities.orgs?.length || it.entities.places?.length))) {
-    entitiesQueue.push(it);
-  }
 
   return el;
 }
@@ -411,33 +255,65 @@ function renderFront(items) {
   for (const it of leads) elLeads.appendChild(card(it));
   for (const it of main)  elMain.appendChild(card(it));
   for (const it of rail)  elRail.appendChild(card(it));
-
-  runClassifyQueue();
-  runEntitiesQueue();
-  runSummaryQueue();
 }
 
-// ---------- hydrate & filters ----------
-function render(items) {
+function renderSuggestions(suggestedBundles = [], tabsById) {
+  const el = document.getElementById("suggestions");
+  if (!el) return;
+  el.innerHTML = "";
+  if (!suggestedBundles.length) return;
+
+  for (const bundle of suggestedBundles) {
+    const banner = document.createElement("div");
+    banner.className = "banner";
+    const title = document.createElement("div");
+    title.innerHTML = `<strong>It looks like you're working on “${bundle.title}”.</strong>`;
+    const meta = document.createElement("div");
+    meta.className = "meta";
+    const names = bundle.tabIds.map(id => (tabsById.get(id)?.title || "Untitled")).join(" • ");
+    meta.textContent = `${bundle.tabIds.length} tabs match • e.g., ${names}`;
+    const button = document.createElement("button");
+    button.textContent = "Create bundle";
+    button.onclick = () => {
+      chrome.runtime.sendMessage({ type: "CREATE_BUNDLE", ...bundle });
+      el.innerHTML = ""; // Hide suggestions after creating a bundle
+    };
+    banner.appendChild(title);
+    banner.appendChild(meta);
+    banner.appendChild(button);
+    el.appendChild(banner);
+  }
+}
+
+
+
+function render(items, suggestedBundles = [], bundles = []) {
   const anyCats = items.some(it => Array.isArray(it.categories) && it.categories.length);
-  nav.innerHTML = ""; if (anyCats) renderFilters(items);
+  renderFilters(items, bundles);
   if (listGrid) listGrid.hidden = true;
   renderFront(items);
+  renderSuggestions(suggestedBundles, new Map(items.map(t => [t.tabId, t])));
 }
 
 async function fetchTabsFromSW() {
   return new Promise((resolve) => {
     chrome.runtime.sendMessage({ type: "GET_TABS_NOW" }, (res) => {
-      if (res && res.ok && Array.isArray(res.tabs)) resolve(res.tabs);
-      else resolve(null);
+      if (res && res.ok) {
+        resolve(res);
+      } else {
+        resolve(null);
+      }
     });
   });
 }
 async function hydrate() {
   const sw = await fetchTabsFromSW();
-  if (sw) { render(sw); return; }
-  const { tabs = [] } = await chrome.storage.local.get("tabs");
-  render(Array.isArray(tabs) ? tabs : []);
+  if (sw) {
+    render(sw.tabs || [], sw.suggestedBundles || [], sw.bundles || []);
+    return;
+  }
+  const { tabs = [], suggestedBundles = [], bundles = [] } = await chrome.storage.local.get(["tabs", "suggestedBundles", "bundles"]);
+  render(Array.isArray(tabs) ? tabs : [], Array.isArray(suggestedBundles) ? suggestedBundles : [], Array.isArray(bundles) ? bundles : []);
 }
 
 chrome.runtime.onMessage.addListener((msg) => {
@@ -445,15 +321,3 @@ chrome.runtime.onMessage.addListener((msg) => {
 });
 chrome.runtime.sendMessage({ type: "PANEL_OPENED" }).catch(() => {});
 hydrate();
-
-// Optional: “Classify all” if you added #classifyAll in HTML
-document.getElementById("classifyAll")?.addEventListener("click", async (e) => {
-  e.stopPropagation();
-  const { tabs = [] } = await chrome.storage.local.get("tabs");
-  for (const it of tabs) {
-    if (it.fullText && it.fullText.length >= 120 && (!it.categories || !it.categories.length)) {
-      classifyQueue.push(it);
-    }
-  }
-  runClassifyQueue();
-});
