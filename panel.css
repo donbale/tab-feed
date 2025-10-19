@@ -140,3 +140,28 @@ html, body { margin:0; padding:0; background:var(--bg); color:#e6eefc; font:14px
 .banner button:hover {
   background: #1d2b43;
 }
+
+/* ===== Rail cards ===== */
+.tf-rail { display:flex; flex-direction:column; gap:12px; }
+.rail-card { background: rgba(255,255,255,0.04); border: 1px solid rgba(255,255,255,0.08); border-radius: 12px; padding: 12px; }
+.rail-card h3 { margin: 0 0 8px; font-size: 13px; opacity: .9; display:flex; align-items:center; gap:8px; }
+.kv { list-style:none; padding:0; margin:0; display:grid; grid-template-columns: 1fr auto; gap:6px 12px; }
+.kv li { display:contents; }
+.kv li span:last-child { opacity:.9; }
+.badge { font-size: 11px; padding: 2px 6px; border-radius: 999px; background: rgba(255,255,255,0.08); }
+.badge.warn { background: rgba(255, 99, 71, 0.25); }
+.btn-primary { margin-top:8px; padding:8px 10px; border-radius:10px; border:1px solid rgba(255,255,255,0.15); background:rgba(255,255,255,0.06); cursor:pointer; }
+.list { margin:0; padding-left:16px; }
+.domain-item, .hot-item { display:flex; justify-content:space-between; align-items:center; }
+.chips { display:flex; flex-wrap:wrap; gap:6px; }
+.chip { border:1px solid rgba(255,255,255,0.15); background:transparent; border-radius:999px; padding:6px 10px; cursor:pointer; font-size:12px; }
+.privacy-grid { display:grid; grid-template-columns: repeat(2, minmax(0,1fr)); gap:8px; }
+.p-flag { border:1px dashed rgba(255,255,255,0.12); padding:8px; border-radius:10px;}
+.pf-title { font-size:12px; opacity:.8; margin-bottom:6px;}
+.pf-row { display:flex; justify-content:space-between; font-size:12px; margin:2px 0;}
+
+/* Hide any extension details blocks globally */
+.ext-details{display:none !important}
+
+/* domain list for risky domains */
+.domainlist { margin-top:.5rem; }
