@@ -9,3 +9,12 @@ export const MSG = {
   PIN_TOGGLE: "PIN_TOGGLE",
   TABS_UPDATED: "TABS_UPDATED"
 };
+
+export const STATS = {
+  UPDATED: "STATS_UPDATED",
+  CLEAN_NOW: "STATS_CLEAN_NOW"
+};
+
+export const ENRICH = {
+  PRIVACY_FLAGS: "PRIVACY_FLAGS"
+};

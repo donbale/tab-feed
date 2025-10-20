@@ -6,6 +6,7 @@ const SELF_PREFIX = chrome.runtime.getURL("");           // chrome-extension://<
 const PANEL_URL   = chrome.runtime.getURL("panel.html");
 
 // ---------- State ----------
+const STATS = {UPDATED:"STATS_UPDATED", CLEAN_NOW:"STATS_CLEAN_NOW"};
 const tabsIndex = new Map(); // tabId -> item
 let broadcastTimer = null;
 let saveTimer = null;
@@ -670,3 +671,228 @@ async function init() {
 init();
 
 console.log("[TabFeed] background ready");
+
+
+// ===== Session Stats & Privacy Flags =====
+const requestLog = new Map(); // tabId -> {count1m, lastPrune, thirdParty, trackers, mixedContent}
+const trackersList = [
+  "google-analytics.com","googletagmanager.com","doubleclick.net","facebook.com",
+  "adservice.google.com","adsystem.com","quantserve.com","scorecardresearch.com",
+  "mixpanel.com","segment.com","hotjar.com","braze.com","newrelic.com","sentry.io"
+];
+let lastCleanAt = 0;
+chrome.storage.local.get({lastCleanAt: 0}, (d)=>{ lastCleanAt = d.lastCleanAt || 0; });
+
+function hostname(u){ try { return new URL(u).hostname; } catch(e){ return ""; } }
+
+function pruneRequests(tabId){
+  const rec = requestLog.get(tabId);
+  if (!rec) return;
+  const now = Date.now();
+  // keep 2-minute window buckets
+  rec.events = (rec.events||[]).filter(t => now - t < 120000);
+  rec.count1m = rec.events.filter(t => now - t < 60000).length;
+  requestLog.set(tabId, rec);
+}
+
+chrome.webRequest.onCompleted.addListener((details) => {
+  const {tabId, url, initiator} = details;
+  if (tabId < 0) return;
+  let rec = requestLog.get(tabId) || {events:[], thirdParty:0, trackers:0, mixedContent:false};
+  rec.events.push(Date.now());
+  // third-party
+  try{
+    const uHost = new URL(url).hostname;
+    const initHost = initiator ? new URL(initiator).hostname : "";
+    if (initHost && uHost && !uHost.endsWith(initHost) && !initHost.endsWith(uHost)) {
+      rec.thirdParty++;
+    }
+    // trackers
+    if (trackersList.some(t => uHost.includes(t))) {
+      rec.trackers++;
+    }
+  }catch(e){}
+  requestLog.set(tabId, rec);
+  pruneRequests(tabId);
+}, {urls:["<all_urls>"]});
+
+chrome.webRequest.onBeforeRequest.addListener((details)=>{
+  // mark mixed content: main page https but subresource http
+  const {tabId, url, type, initiator} = details;
+  if (tabId < 0) return;
+  try{
+    const isHttp = url.startsWith("http://");
+    const initHttps = initiator && initiator.startsWith("https://");
+    if (isHttp && initHttps) {
+      const rec = requestLog.get(tabId) || {events:[], thirdParty:0, trackers:0, mixedContent:false};
+      rec.mixedContent = true;
+      requestLog.set(tabId, rec);
+    }
+  }catch(e){}
+}, {urls:["<all_urls>"]});
+
+async function getMicrophoneCameraFlags(tab) {
+  return new Promise((resolve) => {
+    const primaryUrl = tab.url || "https://example.com/";
+    chrome.contentSettings.microphone.get({primaryUrl}, (mic) => {
+      chrome.contentSettings.camera.get({primaryUrl}, (cam) => {
+        resolve({micAllowed: mic?.setting === "allow", camAllowed: cam?.setting === "allow"});
+      });
+    });
+  });
+}
+
+async function buildSessionStats() {
+  const tabs = await chrome.tabs.query({});
+  const openTabs = tabs.length;
+  const domainsMap = {};
+  for (const t of tabs) {
+    const u = t.url || "";
+    let h = "";
+    try {
+      const parsed = new URL(u);
+      // Skip extension/internal pages
+      if (parsed.protocol === "chrome-extension:" || parsed.protocol === "moz-extension:" || parsed.protocol === "edge:") continue;
+      h = parsed.hostname || "";
+    } catch(e) { h = ""; }
+    if (!h) continue;
+    // Filter out generic "extensions" page and 32-char extension IDs
+    if (h === "extensions" || /^[a-p]{32}$/.test(h)) continue;
+    domainsMap[h] = (domainsMap[h]||0) + 1;
+  }
+  const uniqueDomains = Object.keys(domainsMap).length;
+
+  // approximate memory: 80 MB base + 40 MB per tab (very rough)
+  const memoryEstimateMB = Math.round(80 + openTabs * 40);
+
+  // hot tabs by recent request volume
+  const hot = tabs.map(t => {
+    pruneRequests(t.id);
+    const rec = requestLog.get(t.id) || {count1m:0};
+    
+  
+
+  return {tabId:t.id, title:t.title||"", count1m: rec.count1m||0};
+  }).sort((a,b)=>b.count1m - a.count1m).slice(0,5);
+
+  // context score based on titles similarity
+  const titles = tabs.map(t => (t.title || "") + " " + (t.url||""));
+  function tokenize(s){ return (s.toLowerCase().match(/[a-z0-9]{3,}/g)||[])}
+  const vecs = titles.map(t => {
+    const v = {};
+    for (const w of tokenize(t)) v[w]=(v[w]||0)+1;
+    // normalize
+    const norm = Math.sqrt(Object.values(v).reduce((a,b)=>a+b*b,0)) || 1;
+    for (const k in v) v[k]=v[k]/norm;
+    return v;
+  });
+  function dot(a,b){ let s=0; for (const k in a){ if (b[k]) s+= a[k]*b[k]; } return s; }
+  let pairs=0, sum=0;
+  for (let i=0;i<vecs.length;i++){
+    for (let j=i+1;j<vecs.length;j++){
+      sum += dot(vecs[i], vecs[j]);
+      pairs++;
+    }
+  }
+  const contextScore = pairs ? Math.round((sum/pairs)*100) : 100;
+
+  // categories quick chips
+  const categories = {Docs:0, News:0, Dev:0, Shopping:0};
+  for (const t of tabs) {
+    const u = t.url||"";
+    if (/\.(docs|sheets|slides)\.google\.com|notion\.so|dropbox\.com|onedrive\.live\.com/.test(u)) categories.Docs++;
+    if (/news|nytimes|bbc\.co\.uk|theguardian|reuters|bloomberg|cnn\.com/.test(u)) categories.News++;
+    if (/github\.com|gitlab\.com|stack(overflow|exchange)\.com|developer\.mozilla|npmjs\.com|reactjs|mdn/.test(u)) categories.Dev++;
+    if (/amazon\.[a-z.]+|ebay\.[a-z.]+|aliexpress|etsy\.com|bestbuy|argos\.co\.uk/.test(u)) categories.Shopping++;
+  }
+
+  // --- Security & Safety counts ---
+  let insecureTabs = 0;
+  let tabsWithTrackers = 0;
+  const riskyTLDs = new Set(["zip","xyz","top","gq","tk","work","click","country","kim","men","loan"]);
+  const riskyBlocklist = new Set([
+    // Add any known-bad or suspicious domains you care about here
+    "example-malware.test","badexample.com","phishy-login.com"
+  ]);
+  const domainCounts = {}; // already have domainsMap but we reuse for clarity
+  for (const [host,count] of Object.entries(domainsMap)) domainCounts[host]=count;
+
+  // Compute insecure & trackers per tab, and gather risky domains
+  const riskyDomainsSet = new Set();
+  for (const t of tabs) {
+    try {
+      const u = new URL(t.url || "");
+      if (u.protocol === "http:") insecureTabs++;
+      const rec = requestLog.get(t.id) || {trackers:0};
+      if ((rec.trackers||0) > 0) tabsWithTrackers++;
+      const host = u.hostname || "";
+      if (host) {
+        const parts = host.split(".");
+        const tld = parts[parts.length-1] || "";
+        const uncommon = (domainsMap[host]||0) === 1;
+        const tldRisk = riskyTLDs.has(tld.toLowerCase());
+        const listed = riskyBlocklist.has(host.toLowerCase());
+        if (listed || (uncommon && tldRisk)) {
+          riskyDomainsSet.add(host);
+        }
+      }
+    } catch(e) {}
+  }
+  const riskyDomains = Array.from(riskyDomainsSet).sort();
+
+  return { openTabs, uniqueDomains, memoryEstimateMB, hot,
+    insecureTabs, tabsWithTrackers, riskyDomainsCount: riskyDomains.length, riskyDomains,
+    timeSinceLastCleanMs: lastCleanAt ? (Date.now()-lastCleanAt) : null,
+    categories, domainsTop: Object.entries(domainsMap).sort((a,b)=>b[1]-a[1]).slice(0,10)
+  };
+}
+
+async function getPrivacyFlagsForTabs() {
+  const tabs = await chrome.tabs.query({});
+  const flags = {};
+  for (const t of tabs) {
+    const rec = requestLog.get(t.id) || {thirdParty:0, trackers:0, mixedContent:false};
+    const micCam = await getMicrophoneCameraFlags(t);
+    flags[t.id] = {
+      thirdParty: rec.thirdParty||0,
+      trackers: rec.trackers||0,
+      mixedContent: !!rec.mixedContent,
+      micAllowed: micCam.micAllowed,
+      camAllowed: micCam.camAllowed,
+      audible: !!t.audible
+    };
+  }
+  return flags;
+}
+
+async function broadcastStats(){
+  const stats = await buildSessionStats();
+  const flags = await getPrivacyFlagsForTabs();
+  chrome.runtime.sendMessage({type: STATS.UPDATED, stats, privacy: flags});
+}
+
+chrome.tabs.onUpdated.addListener(()=>{ broadcastStats(); });
+chrome.tabs.onCreated.addListener(()=>{ broadcastStats(); });
+chrome.tabs.onRemoved.addListener(()=>{ broadcastStats(); });
+chrome.webRequest.onCompleted.addListener(()=>{ broadcastStats(); }, {urls:["<all_urls>"]});
+chrome.webRequest.onBeforeRequest.addListener(()=>{ broadcastStats(); }, {urls:["<all_urls>"]});
+
+// handle clean now
+chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
+  if (msg?.type === STATS.CLEAN_NOW) {
+    lastCleanAt = Date.now();
+    chrome.storage.local.set({lastCleanAt});
+    broadcastStats();
+    sendResponse({ok:true, lastCleanAt});
+    return true;
+  }
+});
+
+
+chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
+  if (msg === "PANEL_PING" || msg?.type === "PANEL_PING") {
+    broadcastStats();
+    sendResponse && sendResponse({ok:true});
+    return true;
+  }
+});

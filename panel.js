@@ -1,3 +1,25 @@
+
+let latestPrivacy = {};
+// ---- escapeHTML guard ----
+if (typeof escapeHTML === "undefined") {
+  function escapeHTML(str) {
+    if (!str) return "";
+    return str.replace(/[&<>'"]/g, c => ({
+      '&': '&amp;',
+      '<': '&lt;',
+      '>': '&gt;',
+      "'": '&#39;',
+      '"': '&quot;'
+    }[c]));
+  }
+}
+
+
+// ---- Cross-file constants (guard) ----
+if (typeof STATS === "undefined") {
+  var STATS = { UPDATED: "STATS_UPDATED", CLEAN_NOW: "STATS_CLEAN_NOW" };
+}
+
 // panel.js — Front Page + Reading-time badges
 
 const counts = document.getElementById("counts");
@@ -232,7 +254,26 @@ function card(it, { variant="standard" } = {}) {
   }
   el.appendChild(sum);
 
-  el.appendChild(actionsBar(it));
+  
+  // Privacy chips (from latestPrivacy)
+  const pf = latestPrivacy && latestPrivacy[it.tabId];
+  if (pf) {
+    const pv = document.createElement("div");
+    pv.className = "chips";
+    const mk = (label, value, warn=false) => {
+      const sp = document.createElement("span");
+      sp.className = "chip" + (warn ? " warn" : "");
+      sp.textContent = `${label}: ${value}`;
+      return sp;
+    };
+    pv.appendChild(mk("Trackers", pf.trackers||0, (pf.trackers||0)>0));
+    pv.appendChild(mk("3rd‑party", pf.thirdParty||0));
+    pv.appendChild(mk("Mixed", pf.mixedContent ? "yes" : "no", !!pf.mixedContent));
+    pv.appendChild(mk("Mic", pf.micAllowed ? "on" : "off", !!pf.micAllowed));
+    pv.appendChild(mk("Cam", pf.camAllowed ? "on" : "off", !!pf.camAllowed));
+    el.appendChild(pv);
+  }
+el.appendChild(actionsBar(it));
 
   return el;
 }
@@ -247,14 +288,14 @@ function renderFront(items) {
   const rest = sorted.filter(x => x !== hero);
   const leads = rest.slice(0, 3);
   const afterLeads = rest.slice(3);
-  const main  = afterLeads.slice(0, 9);
-  const rail  = afterLeads.slice(9, 17);
+  const main  = afterLeads.slice(0, 17);
+  // Keep the rail dedicated to session stats; do not place tab cards there.
 
-  elHero.innerHTML = elLeads.innerHTML = elMain.innerHTML = elRail.innerHTML = "";
+  // Clear content in hero, leads, and main — but leave the rail intact
+  elHero.innerHTML = elLeads.innerHTML = elMain.innerHTML = "";
   if (hero) elHero.appendChild(card(hero, { variant:"hero" }));
   for (const it of leads) elLeads.appendChild(card(it));
   for (const it of main)  elMain.appendChild(card(it));
-  for (const it of rail)  elRail.appendChild(card(it));
 }
 
 function renderSuggestions(suggestedBundles = [], tabsById) {
@@ -321,3 +362,96 @@ chrome.runtime.onMessage.addListener((msg) => {
 });
 chrome.runtime.sendMessage({ type: "PANEL_OPENED" }).catch(() => {});
 hydrate();
+
+// ===== Rail: Session Stats, Quick Chips, Context Score, Privacy =====
+
+function renderRail(stats, privacy){
+  if (!elRail) return;
+  const cleanAgo = stats.timeSinceLastCleanMs != null ? timeAgo(Date.now() - stats.timeSinceLastCleanMs) : "never";
+  const hotList = (stats.hot||[]).map(h => `
+    <li class="hot-item">
+      <span class="title">${escapeHTML(h.title||'Tab')}</span>
+      <span class="badge">${h.count1m}/min</span>
+    </li>`).join("");
+
+  const domains = (stats.domainsTop||[]).map(([host,count]) => `
+    <li class="domain-item"><span>${host}</span><span class="badge">${count}</span></li>`).join("");
+
+  // Context nudge
+  const ctx = stats.contextScore ?? 100;
+  const nudge = ctx < 40 ? "Your tabs look scattered — consider grouping or closing a few outliers." :
+                ctx < 70 ? "A bit of a mix — grouping related work could help focus." :
+                           "Nice! Your current tabs are fairly cohesive.";
+
+  // Category chips
+  const chips = Object.entries(stats.categories||{}).map(([k,v]) => `
+    <button class="chip" data-chip="${k}">${k} <span class="badge">${v}</span></button>`).join("");
+
+  elRail.innerHTML = `
+    <section class="rail-card">
+      <h3>Session Stats</h3>
+      <ul class="kv">
+        <li><span>Open tabs</span><span>${stats.openTabs}</span></li>
+        <li><span>Unique domains</span><span>${stats.uniqueDomains}</span></li>
+        <li><span>Memory usage</span><span>${stats.memoryEstimateMB} MB</span></li>
+      
+      </ul>
+      
+    </section>
+
+
+    <section class="rail-card">
+      <h3>Security &amp; Safety</h3>
+      <ul class="kv">
+        <li><span>Insecure tabs (HTTP)</span><span><span class="badge">${stats.insecureTabs||0}</span></span></li>
+        <li><span>Tabs w/ trackers</span><span><span class="badge">${stats.tabsWithTrackers||0}</span></span></li>
+        <li><span>Potentially risky domains</span><span><span class="badge">${stats.riskyDomainsCount||0}</span></span></li>
+      </ul>
+      ${ (stats.riskyDomains && stats.riskyDomains.length) ? `<details><summary class="subtle">Show domains</summary><ol class="list domainlist">${stats.riskyDomains.map(h=>`<li class='domain-item'><span>${h}</span></li>`).join("")}</ol></details>` : "" }
+    </section>
+
+
+    <section class="rail-card">
+      <h3>Top Domains</h3>
+      <ol class="list">${domains || "<li>No data</li>"}</ol>
+    </section>
+
+    <section class="rail-card">
+      <h3>Quick Chips</h3>
+      <div class="chips">${chips}</div>
+    </section>
+
+    <section class="rail-card">
+      <h3>Focus — Context score <span class="badge">${ctx}</span></h3>
+      <p class="subtle">${nudge}</p>
+      <ol class="list hotlist">${hotList || "<li class='domain-item'>No hot tabs</li>"}</ol>
+    </section>
+  `;
+
+  document.getElementById("btn-clean")?.addEventListener("click", ()=>{
+    chrome.runtime.sendMessage({type: STATS.CLEAN_NOW}, (res)=>{ /* refreshed by bg */ });
+  });
+
+  // chip filters
+  elRail.querySelectorAll(".chip").forEach(ch=>{
+    ch.addEventListener("click", ()=>{
+      const which = ch.dataset.chip;
+      // simple broadcast: filter main grid by category using existing list if present
+      // You can hook into your existing filters if available.
+      alert("Filter by " + which + " — hook into your list rendering to apply.");
+    });
+  });
+}
+
+// Listen for stat updates
+chrome.runtime.onMessage.addListener((msg) => {
+  if (msg?.type === STATS.UPDATED) {
+    // stats include contextScore; ensure default
+    msg.stats.contextScore = msg.stats.contextScore ?? 100;
+    latestPrivacy = msg.privacy || {};
+    renderRail(msg.stats, {});
+  }
+});
+
+// initial ping to get stats
+chrome.runtime.sendMessage({type: "PANEL_PING"});
