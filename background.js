@@ -218,15 +218,14 @@ async function generateBundleSummaryAndTips(bundle) {
   const context = tabs.map(t => `Title: ${t.title}\nURL: ${t.url}\nSummary: ${t.summary}\n`).join("\n---\n");
 
   const summaryPrompt = `Summarize the following content from a bundle of tabs:\n${context}`;
-  const tipsPrompt = `Based on the following content, suggest 3-5 next steps for the user:\n${context}`;
+  // Tips: generate actionable, link-based suggestions deterministically (SW may not have LM)
 
   try {
     const lm = await getLM();
     if (!lm) return;
 
     const summary = await lm.prompt([{ role: "user", content: summaryPrompt }]);
-    const tipsResponse = await lm.prompt([{ role: "user", content: tipsPrompt }]);
-    const tips = tipsResponse.split("\n").map(t => t.replace(/^- /, "")).filter(Boolean);
+    const tips = buildActionableTips(bundle.title || tabs[0]?.title || "");
 
     bundle.summary = summary;
     bundle.tips = tips;
@@ -235,6 +234,20 @@ async function generateBundleSummaryAndTips(bundle) {
   } catch (e) {
     console.error("[TabFeed][bg] generateBundleSummaryAndTips failed", e);
   }
+}
+
+function buildActionableTips(subjectRaw="") {
+  const subject = (subjectRaw||"").trim() || "this topic";
+  const enc = encodeURIComponent;
+  const tips = [
+    { label: `Find background on ${subject}`, url: `https://www.google.com/search?q=${enc(subject)}` },
+    { label: `Latest news on ${subject}`, url: `https://www.google.com/search?q=${enc(subject)}&tbm=nws` },
+    { label: `Wikipedia overview`, url: `https://en.wikipedia.org/wiki/Special:Search?search=${enc(subject)}` },
+    { label: `Reddit discussions`, url: `https://www.reddit.com/search/?q=${enc(subject)}` },
+    { label: `YouTube explainers`, url: `https://www.youtube.com/results?search_query=${enc(subject)}` },
+    { label: `Top attractions in ${subject}`, url: `https://www.tripadvisor.com/Search?q=${enc('top attractions ' + subject)}` }
+  ];
+  return tips;
 }
 
 // ---------- Entity Extraction (moved from panel.js) ----------
@@ -585,13 +598,42 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         try {
           const lm = await getLM();
           if (!lm) {
+            // Persist failed attempt as well for history visibility
+            try {
+              const idx = bundles.findIndex(b => b.id === bundle.id);
+              if (idx >= 0) {
+                const record = { ts: Date.now(), question, answer: "(LM unavailable)", error: true };
+                bundles[idx].chat = Array.isArray(bundles[idx].chat) ? bundles[idx].chat : [];
+                bundles[idx].chat.push(record);
+                await saveAndBroadcast();
+              }
+            } catch {}
             sendResponse?.({ answer: "Sorry, the Language Model is not available." });
             return;
           }
           const answer = await lm.prompt([{ role: "system", content: systemPrompt }, { role: "user", content: userPrompt }]);
+          // Save Q&A into bundle chat history
+          try {
+            const idx = bundles.findIndex(b => b.id === bundle.id);
+            if (idx >= 0) {
+              const record = { ts: Date.now(), question, answer };
+              bundles[idx].chat = Array.isArray(bundles[idx].chat) ? bundles[idx].chat : [];
+              bundles[idx].chat.push(record);
+              await saveAndBroadcast();
+            }
+          } catch {}
           sendResponse?.({ answer });
         } catch (e) {
           console.error("[TabFeed][bg] ASK_QUESTION failed", e);
+          try {
+            const idx = bundles.findIndex(b => b.id === bundle.id);
+            if (idx >= 0) {
+              const record = { ts: Date.now(), question, answer: "(error)", error: true };
+              bundles[idx].chat = Array.isArray(bundles[idx].chat) ? bundles[idx].chat : [];
+              bundles[idx].chat.push(record);
+              await saveAndBroadcast();
+            }
+          } catch {}
           sendResponse?.({ answer: "Sorry, I couldn't answer the question." });
         }
         return;
@@ -600,8 +642,29 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       if (msg?.type === "GET_BUNDLE") {
         const bundle = bundles.find(b => b.id === msg.id);
         if (bundle) {
-          const tabs = bundle.tabIds.map(id => tabsIndex.get(id)).filter(Boolean);
-          sendResponse?.({ ok: true, bundle, tabs });
+          // Prefer live tabs; fall back to saved items snapshot (by tabId or URL)
+          const liveTabs = new Map();
+          for (const id of bundle.tabIds || []) {
+            const it = tabsIndex.get(id);
+            if (it) liveTabs.set(id, it);
+          }
+          const savedItems = Array.isArray(bundle.items) ? bundle.items : [];
+          const urlToSaved = new Map(savedItems.map(si => [si.url, si]));
+          const merged = [];
+          for (const id of bundle.tabIds || []) {
+            const live = liveTabs.get(id);
+            if (live) { merged.push(live); continue; }
+            // fallback by saved snapshot matching tabId or URL
+            const snap = savedItems.find(si => si.tabId === id) || urlToSaved.get((tabsIndex.get(id)?.url)||"");
+            if (snap) merged.push(snap);
+          }
+          // also include any saved items that no longer have tabIds listed (defensive)
+          for (const si of savedItems) {
+            if (!((bundle.tabIds||[]).includes(si.tabId)) && !merged.find(m => m.url === si.url)) {
+              merged.push(si);
+            }
+          }
+          sendResponse?.({ ok: true, bundle, tabs: merged });
         } else {
           sendResponse?.({ ok: false });
         }
@@ -615,13 +678,107 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
           tabIds: msg.tabIds,
           summary: "",
           tips: [],
+          chat: [],
         };
         bundles.push(newBundle);
         suggestedBundles = []; // Clear suggestions
         await saveAndBroadcast();
+        // Keep background-side generation best-effort; UI now also handles in-page generation
         generateBundleSummaryAndTips(newBundle);
         scheduleSuggestBundles(); // Re-suggest after creating a bundle
         sendResponse?.({ ok: true });
+        return;
+      }
+
+      if (msg?.type === "SAVE_BUNDLE_AND_CLOSE") {
+        const idx = bundles.findIndex(b => b.id === msg.id);
+        if (idx < 0) { sendResponse?.({ ok: false }); return; }
+        const b = bundles[idx];
+        // Snapshot current tab data for persistence
+        const items = (b.tabIds || []).map(id => tabsIndex.get(id)).filter(Boolean).map(it => ({
+          tabId: it.tabId,
+          url: it.url,
+          domain: it.domain,
+          title: it.title,
+          favicon: it.favicon,
+          heroImage: it.heroImage,
+          description: it.description,
+          fullText: it.fullText,
+          summary: it.summary,
+          categories: Array.isArray(it.categories) ? it.categories.slice(0) : [],
+          entities: it.entities ? JSON.parse(JSON.stringify(it.entities)) : undefined,
+          readingMinutes: it.readingMinutes,
+          savedAt: Date.now()
+        }));
+        bundles[idx].items = items;
+        bundles[idx].archived = true;
+        bundles[idx].savedAt = Date.now();
+        await saveAndBroadcast();
+
+        // Close tabs that are still open
+        try {
+          const closeIds = (b.tabIds || []).filter(id => !!tabsIndex.get(id));
+          if (closeIds.length) await chrome.tabs.remove(closeIds);
+        } catch (e) {
+          console.warn("[TabFeed][bg] closing tabs for bundle failed", e);
+        } finally {
+          await reconcileAndBroadcast();
+        }
+        sendResponse?.({ ok: true });
+        return;
+      }
+
+      if (msg?.type === "UPDATE_BUNDLE_META") {
+        const { id, summary, tips } = msg;
+        const idx = bundles.findIndex(b => b.id === id);
+        if (idx >= 0) {
+          if (typeof summary === "string") bundles[idx].summary = summary;
+          if (Array.isArray(tips)) bundles[idx].tips = tips;
+          await saveAndBroadcast();
+          sendResponse?.({ ok: true });
+        } else {
+          sendResponse?.({ ok: false });
+        }
+        return;
+      }
+
+      if (msg?.type === "REMOVE_TAB_FROM_BUNDLE") {
+        const { id, tabId, url } = msg;
+        const idx = bundles.findIndex(b => b.id === id);
+        if (idx < 0) { sendResponse?.({ ok: false }); return; }
+        const b = bundles[idx];
+        // Remove from tabIds by tabId or by matching saved item URL
+        if (tabId != null) {
+          b.tabIds = (b.tabIds || []).filter(tid => tid !== tabId);
+        } else if (url) {
+          // find any tabId that matches saved snapshot URL
+          const targets = new Set((b.items||[]).filter(si => si.url === url).map(si => si.tabId).filter(v => v != null));
+          if (targets.size) b.tabIds = (b.tabIds||[]).filter(tid => !targets.has(tid));
+        }
+        // Also prune saved items if present
+        if (url) {
+          b.items = (b.items || []).filter(si => si.url !== url);
+        } else if (tabId != null) {
+          b.items = (b.items || []).filter(si => si.tabId !== tabId);
+        }
+        bundles[idx] = b;
+        await saveAndBroadcast();
+        sendResponse?.({ ok: true, bundle: b });
+        return;
+      }
+
+      if (msg?.type === "ADD_TAB_TO_BUNDLE") {
+        const { id, tabId } = msg;
+        if (tabId == null) { sendResponse?.({ ok:false }); return; }
+        const idx = bundles.findIndex(b => b.id === id);
+        if (idx < 0) { sendResponse?.({ ok:false }); return; }
+        const b = bundles[idx];
+        b.tabIds = Array.isArray(b.tabIds) ? b.tabIds : [];
+        if (!b.tabIds.includes(tabId)) b.tabIds.push(tabId);
+        // If items snapshot exists and same tab/url is present, do nothing; live merge handles it.
+        bundles[idx] = b;
+        await saveAndBroadcast();
+        sendResponse?.({ ok:true, bundle: b });
         return;
       }
 

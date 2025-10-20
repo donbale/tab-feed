@@ -16,7 +16,11 @@
       <div class="row">
         <button id="reSmz">Re-summarize</button>
         <button id="del">Delete</button>
+        <button id="saveClose">Save & Close Tabs</button>
       </div>
+      <h2 style="margin-top:12px;">Add tabs</h2>
+      <input id="addSearch" type="text" placeholder="Search open tabs" style="width:100%;margin:6px 0;"/>
+      <div class="list" id="addTabs"></div>
     </aside>
     <main>
       <div class="summary" id="bSummary">Loading…</div>
@@ -26,6 +30,7 @@
         <button id="askBtn">Ask</button>
       </div>
       <div id="answer" class="summary" style="margin-top:8px;color:#bcd4ff;"></div>
+      <div id="chatLog" class="summary" style="margin-top:8px;"></div>
     </main>
   </div>
   <script src="bundle.js"></script>
