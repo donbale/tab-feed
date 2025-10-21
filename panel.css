@@ -8,7 +8,7 @@
 }
 
 * { box-sizing: border-box; }
-html, body { margin:0; padding:0; background:var(--bg); color:#e6eefc; font:14px/1.45 system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial; }
+html, body { margin:0; padding:0; background:var(--bg); color:#e6eefc; font:14px/1.5 "Google Sans", Roboto, "Noto Sans", "Segoe UI", -apple-system, BlinkMacSystemFont, "Helvetica Neue", Arial, sans-serif; }
 
 .tf-header {
   display:flex; justify-content:space-between; align-items:center;
@@ -16,7 +16,9 @@ html, body { margin:0; padding:0; background:var(--bg); color:#e6eefc; font:14px
   position:sticky; top:0; background:linear-gradient(180deg, rgba(11,18,32,.96), rgba(11,18,32,.92));
   backdrop-filter: blur(8px); z-index:10;
 }
-.tf-header .brand { font-weight:800; letter-spacing: .2px; color:var(--brand); }
+.tf-header .brand { font-weight:800; letter-spacing: .2px; color:var(--brand); font-family: inherit; }
+.tf-header .brand { display:inline-flex; align-items:center; gap:8px; }
+.tf-header .brand-icon { width:18px; height:18px; border-radius:4px; display:block; }
 .tf-header .meta  { color:var(--muted); }
 
 .tf-nav { display:flex; gap:.5rem; flex-wrap:wrap; padding:10px 14px; border-bottom:1px solid var(--border); }
@@ -79,10 +81,11 @@ html, body { margin:0; padding:0; background:var(--bg); color:#e6eefc; font:14px
 .card .meta { color:var(--muted); font-size:12px; }
 .card .summary { color:#d8e5ff; font-size:14px; }
 
-.actions { display:flex; gap:.5rem; margin-top:6px; }
+.actions { display:flex; gap:.5rem; margin-top:6px; flex-wrap: wrap; }
 .actions button, .actions a {
   padding:.35rem .6rem; border-radius:10px; border:1px solid var(--border); background:#18253a; color:#dfeafd; text-decoration:none;
 }
+.actions button, .actions a { white-space: nowrap; }
 .actions a:hover, .actions button:hover { background:#1d2b43; }
 
 .chips { display:flex; gap:.35rem; flex-wrap:wrap; }

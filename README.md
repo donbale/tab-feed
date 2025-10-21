@@ -26,7 +26,7 @@ A Chrome side-panel extension that shows all your open tabs as cards, complete w
 4. **Try it out**
 
    * Open some news/dev pages in tabs
-   * Open the Side panel (puzzle piece → *Tab Feed (POC)* or right edge side-panel icon)
+   * Open the Side panel (puzzle piece → *TabFeed* or right edge side-panel icon)
    * You’ll see your tabs show up as cards and live-update when you open/close or navigate.
 
 ---
