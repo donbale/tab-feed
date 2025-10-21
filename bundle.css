@@ -8,7 +8,7 @@
 }
 
 * { box-sizing: border-box; }
-html, body { margin:0; padding:0; background:var(--bg); color:#e6eefc; font:14px/1.45 system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial; }
+html, body { margin:0; padding:0; background:var(--bg); color:#e6eefc; font:14px/1.5 "Google Sans", Roboto, "Noto Sans", "Segoe UI", -apple-system, BlinkMacSystemFont, "Helvetica Neue", Arial, sans-serif; }
 
 .wrap {
   display: grid;
@@ -37,7 +37,9 @@ main {
 
 h1 {
   margin: 0 0 6px;
-  font-size: 18px;
+  font-size: 20px;
+  font-weight: 700;
+  letter-spacing: .2px;
 }
 
 .meta {
@@ -65,10 +67,16 @@ h1 {
 }
 
 .summary {
-  white-space: pre-wrap;
+  white-space: normal;
   font-size: 14px;
   color: #d8e6ff;
 }
+
+/* Allow basic list styles for rendered markdown */
+.summary ul, .summary ol { margin: 8px 0 8px 20px; padding: 0; }
+.summary li { margin: 4px 0; }
+.summary h1, .summary h2, .summary h3 { margin: 8px 0 6px; font-weight: 700; }
+.summary code { background: rgba(255,255,255,0.06); padding: 0 3px; border-radius: 4px; }
 
 .tips {
   display: flex;

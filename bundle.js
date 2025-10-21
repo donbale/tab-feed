@@ -11,7 +11,7 @@ async function hydrate() {
       document.getElementById("bTitle").textContent = bundle.title;
       document.getElementById("bMeta").textContent = `${bundle.tabIds.length} tabs`;
       const summaryEl = document.getElementById("bSummary");
-      summaryEl.textContent = bundle.summary || "Generating summary...";
+      summaryEl.innerHTML = bundle.summary ? renderMarkdown(bundle.summary) : "Generating summary...";
       
       const tipsContainer = document.getElementById("bTips");
       tipsContainer.innerHTML = "";
@@ -80,33 +80,57 @@ async function hydrate() {
       const answerDiv = document.getElementById("answer");
       const chatLog = document.getElementById("chatLog");
 
-      askButton.addEventListener("click", async () => {
-        const question = askInput.value;
-        if (question) {
-          answerDiv.textContent = "Thinking…";
-          const { answer } = await new Promise((resolve) => {
-            chrome.runtime.sendMessage({ type: "ASK_QUESTION", question, bundle }, resolve);
-          });
-          answerDiv.textContent = answer;
-          // Re-hydrate to show chat history
-          hydrate();
-        }
-      });
+      // Prevent multiple listeners by using direct assignment
+      askButton.onclick = async () => {
+        const question = (askInput.value || "").trim();
+        if (!question) return;
+        askButton.disabled = true;
+        answerDiv.textContent = "Thinking…";
+        const { answer } = await new Promise((resolve) => {
+          chrome.runtime.sendMessage({ type: "ASK_QUESTION", question, bundle }, resolve);
+        });
+        answerDiv.innerHTML = renderMarkdown(answer || "");
+        askButton.disabled = false;
+        // Re-hydrate to show chat history
+        hydrate();
+      };
 
-      // Render chat history if present
+      // Submit on Enter
+      if (askInput) {
+        askInput.onkeydown = (e) => {
+          if (e.key === "Enter" && !e.shiftKey) {
+            e.preventDefault();
+            askButton.click();
+          }
+        };
+      }
+
+      // Render chat history with Markdown
       chatLog.innerHTML = "";
       if (Array.isArray(bundle.chat) && bundle.chat.length) {
         for (const entry of bundle.chat.slice(-10)) { // show last 10
-          const q = document.createElement("div");
-          q.textContent = `Q: ${entry.question}`;
-          const a = document.createElement("div");
-          a.textContent = `A: ${entry.answer}`;
-          a.style.color = "#bcd4ff";
-          const sep = document.createElement("div");
-          sep.style.height = "6px";
-          chatLog.appendChild(q);
-          chatLog.appendChild(a);
-          chatLog.appendChild(sep);
+          const wrap = document.createElement("div");
+          wrap.style.marginTop = "8px";
+
+          const qLabel = document.createElement("div");
+          qLabel.className = "meta";
+          qLabel.textContent = "Q:";
+          const qBody = document.createElement("div");
+          qBody.className = "summary";
+          qBody.innerHTML = renderMarkdown(entry.question || "");
+
+          const aLabel = document.createElement("div");
+          aLabel.className = "meta";
+          aLabel.textContent = "A:";
+          const aBody = document.createElement("div");
+          aBody.className = "summary";
+          aBody.innerHTML = renderMarkdown(entry.answer || "");
+
+          wrap.appendChild(qLabel);
+          wrap.appendChild(qBody);
+          wrap.appendChild(aLabel);
+          wrap.appendChild(aBody);
+          chatLog.appendChild(wrap);
         }
       }
 
@@ -134,6 +158,26 @@ async function hydrate() {
       const reBtn = document.getElementById("reSmz");
       if (reBtn) {
         reBtn.onclick = () => tryGenerateBundleSummaryAndTips(bundle, tabs, summaryEl, tipsContainer, { force: true });
+      }
+
+      // Delete bundle with confirmation
+      const delBtn = document.getElementById("del");
+      if (delBtn) {
+        delBtn.onclick = async () => {
+          const ok = window.confirm("Are you sure you want to delete this bundle? This cannot be undone.");
+          if (!ok) return;
+          delBtn.disabled = true;
+          const res = await new Promise((resolve) => {
+            chrome.runtime.sendMessage({ type: "DELETE_BUNDLE", id: bundle.id }, resolve);
+          });
+          if (res && res.ok) {
+            window.location.href = "panel.html";
+          } else {
+            delBtn.disabled = false;
+            delBtn.textContent = "Delete failed";
+            setTimeout(() => { delBtn.textContent = "Delete"; }, 1200);
+          }
+        };
       }
 
       // ---- Add tabs: show open tabs not already in this bundle ----
@@ -235,7 +279,7 @@ Topic context from tabs (for additional cues):\n${context.slice(0, 1200)}`;
     }
 
     // Update UI
-    summaryEl.textContent = summary;
+    summaryEl.innerHTML = renderMarkdown(summary);
     tipsContainer.innerHTML = "";
     tips.forEach(t => {
       if (t && typeof t === "object" && t.url) {
@@ -266,6 +310,61 @@ function buildDeterministicTips(subjectRaw="") {
   // Always helpful travel angle; harmless for non-travel topics
   out.push({ label: `Top attractions in ${subject}`, url: `https://www.tripadvisor.com/Search?q=${enc('top attractions ' + subject)}` });
   return out;
+}
+
+// ---- Minimal, safe Markdown renderer for summaries ----
+function renderMarkdown(md = "") {
+  // Escape HTML first
+  const esc = (s) => String(s)
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/\"/g, "&quot;")
+    .replace(/'/g, "&#39;");
+
+  // Linkify [text](url) for http(s) only
+  const linkify = (s) => s.replace(/\[([^\]]+)\]\((https?:[^)\s]+)\)/g, (m, text, url) => {
+    return `<a href="${url}" target="_blank" rel="noreferrer">${esc(text)}</a>`;
+  });
+
+  // Inline formatting: bold, italics, code
+  const inline = (s) => linkify(s)
+    .replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>')
+    .replace(/\*(?!\s)([^*]+?)\*/g, '<em>$1</em>')
+    .replace(/`([^`]+)`/g, '<code>$1</code>');
+
+  const lines = String(md || "").split(/\r?\n/);
+  let html = '';
+  let inUL = false, inOL = false;
+  const closeLists = () => {
+    if (inUL) { html += '</ul>'; inUL = false; }
+    if (inOL) { html += '</ol>'; inOL = false; }
+  };
+
+  for (let raw of lines) {
+    const l = raw.trim();
+    if (!l) { closeLists(); continue; }
+    let m;
+    if ((m = l.match(/^[-*]\s+(.+)/))) {
+      if (!inUL) { closeLists(); html += '<ul>'; inUL = true; }
+      html += `<li>${inline(esc(m[1]))}</li>`;
+      continue;
+    }
+    if ((m = l.match(/^\d+[.)]\s+(.+)/))) {
+      if (!inOL) { closeLists(); html += '<ol>'; inOL = true; }
+      html += `<li>${inline(esc(m[1]))}</li>`;
+      continue;
+    }
+    // Headings ###, ##, #
+    if ((m = l.match(/^###\s+(.+)/))) { closeLists(); html += `<h3>${inline(esc(m[1]))}</h3>`; continue; }
+    if ((m = l.match(/^##\s+(.+)/)))  { closeLists(); html += `<h2>${inline(esc(m[1]))}</h2>`;  continue; }
+    if ((m = l.match(/^#\s+(.+)/)))   { closeLists(); html += `<h1>${inline(esc(m[1]))}</h1>`;   continue; }
+    // Paragraph
+    closeLists();
+    html += `<p>${inline(esc(l))}</p>`;
+  }
+  closeLists();
+  return html || esc(md);
 }
 
 document.addEventListener("DOMContentLoaded", hydrate);

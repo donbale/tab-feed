@@ -27,6 +27,10 @@ const elHero  = document.getElementById("region-hero");
 const elLeads = document.getElementById("region-leads");
 const elMain  = document.getElementById("region-main");
 const elRail  = document.getElementById("region-rail");
+let lastStats = null;
+let lastDaily = [];
+let dailyWindow = Number(localStorage.getItem('tf_daily_window') || '7');
+let latestItems = [];
 const listGrid= document.getElementById("grid"); // optional / hidden
 const nav     = document.getElementById("filters");
 
@@ -184,7 +188,7 @@ function actionsBar(it) {
   link.href = it.url;
   link.target = "_blank";
   link.rel = "noreferrer";
-  link.textContent = "Open link";
+  link.textContent = "Open";
   link.onclick = (e) => e.stopPropagation();
 
   actions.appendChild(btn("Focus", () =>
@@ -365,7 +369,7 @@ hydrate();
 
 // ===== Rail: Session Stats, Quick Chips, Context Score, Privacy =====
 
-function renderRail(stats, privacy){
+function renderRail(stats, privacy, daily){
   if (!elRail) return;
   const cleanAgo = stats.timeSinceLastCleanMs != null ? timeAgo(Date.now() - stats.timeSinceLastCleanMs) : "never";
   const hotList = (stats.hot||[]).map(h => `
@@ -387,7 +391,24 @@ function renderRail(stats, privacy){
   const chips = Object.entries(stats.categories||{}).map(([k,v]) => `
     <button class="chip" data-chip="${k}">${k} <span class="badge">${v}</span></button>`).join("");
 
+  // Tab age buckets from current open items
+  const now = Date.now();
+  const ageMs = (it) => now - (it.firstSeen || it.updatedAt || now);
+  const olderThan = (days) => latestItems.filter(it => ageMs(it) >= days*24*60*60*1000).length;
+  const older7  = olderThan(7);
+  const older14 = olderThan(14);
+  const older30 = olderThan(30);
+
   elRail.innerHTML = `
+    <section class="rail-card">
+      <h3>Tab Age</h3>
+      <ul class="kv">
+        <li><span>Older than 7 days</span><span><span class="badge">${older7}</span></span></li>
+        <li><span>Older than 14 days</span><span><span class="badge">${older14}</span></span></li>
+        <li><span>Older than 30 days</span><span><span class="badge">${older30}</span></span></li>
+      </ul>
+    </section>
+
     <section class="rail-card">
       <h3>Session Stats</h3>
       <ul class="kv">
@@ -428,6 +449,8 @@ function renderRail(stats, privacy){
     </section>
   `;
 
+  // no selector; static age buckets
+
   document.getElementById("btn-clean")?.addEventListener("click", ()=>{
     chrome.runtime.sendMessage({type: STATS.CLEAN_NOW}, (res)=>{ /* refreshed by bg */ });
   });
@@ -449,7 +472,9 @@ chrome.runtime.onMessage.addListener((msg) => {
     // stats include contextScore; ensure default
     msg.stats.contextScore = msg.stats.contextScore ?? 100;
     latestPrivacy = msg.privacy || {};
-    renderRail(msg.stats, {});
+    lastStats = msg.stats;
+    lastDaily = Array.isArray(msg.daily) ? msg.daily : lastDaily;
+    renderRail(lastStats, {}, lastDaily);
   }
 });
 

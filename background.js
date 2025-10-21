@@ -13,6 +13,9 @@ let saveTimer = null;
 let suggestBundlesTimer = null;
 let suggestedBundles = [];
 let bundles = [];
+const historyChecked = new Set(); // url strings already checked
+// Rolling daily tab counts (persisted in storage)
+let tabDailyCounts = null; // { [YYYY-MM-DD]: number }
 
 async function suggestBundles() {
   const tabs = [...tabsIndex.values()].filter(it => it.fullText && it.fullText.length >= 120);
@@ -332,10 +335,38 @@ function toItemFromTab(t, prev = {}) {
     fullText: prev.fullText || "",
     summary: prev.summary || "",
     categories: prev.categories || [],
+    // Persist the time we first saw this tab (do not reset on reload)
+    firstSeen: prev.firstSeen || Date.now(),
     pinned: !!t.pinned,
     audible: !!t.audible,
     updatedAt: Date.now()
   };
+}
+
+// Query Chrome history to find the earliest visit for a URL and use it as firstSeen
+async function ensureFirstSeenFromHistory(it) {
+  try {
+    const url = it?.url || "";
+    if (!url || isOwnTab(url)) return;
+    if (historyChecked.has(url)) return;
+    historyChecked.add(url);
+    const visits = await chrome.history.getVisits({ url });
+    if (Array.isArray(visits) && visits.length) {
+      const earliest = Math.min.apply(null, visits.map(v => v.visitTime || Date.now()));
+      const existing = it.firstSeen || it.updatedAt || Date.now();
+      if (earliest && earliest < existing) {
+        const cur = tabsIndex.get(it.tabId);
+        if (cur) {
+          cur.firstSeen = earliest;
+          cur.updatedAt = Date.now();
+          tabsIndex.set(it.tabId, cur);
+          scheduleSaveAndBroadcast();
+        }
+      }
+    }
+  } catch (e) {
+    // ignore history failures
+  }
 }
 
 // Only overwrite fields if incoming payload has real content
@@ -378,7 +409,9 @@ async function reconcileAndBroadcast() {
     if (!t.id || isOwnTab(t)) continue;
     liveIds.add(t.id);
     const prev = tabsIndex.get(t.id) || {};
-    tabsIndex.set(t.id, toItemFromTab(t, prev));
+    const it = toItemFromTab(t, prev);
+    tabsIndex.set(t.id, it);
+    ensureFirstSeenFromHistory(it);
   }
   // prune closed
   for (const id of Array.from(tabsIndex.keys())) {
@@ -400,10 +433,14 @@ async function requestParse(tabId) {
 // ---------- Hydrate from storage.local at boot ----------
 async function hydrateFromStorage() {
   try {
-    const { tabs = [], bundles: storedBundles = [] } = await chrome.storage.local.get(["tabs", "bundles"]);
+    const { tabs = [], bundles: storedBundles = [], tabDailyCounts: storedDaily = {} } = await chrome.storage.local.get(["tabs", "bundles", "tabDailyCounts"]);
     if (Array.isArray(tabs)) {
       for (const it of tabs) {
-        if (it.tabId != null) tabsIndex.set(it.tabId, it);
+        if (it.tabId != null) {
+          const obj = { ...it };
+          if (!obj.firstSeen) obj.firstSeen = obj.updatedAt || Date.now();
+          tabsIndex.set(it.tabId, obj);
+        }
       }
       console.log("[TabFeed][bg] hydrated from storage:", tabs.length, "items");
     }
@@ -411,6 +448,7 @@ async function hydrateFromStorage() {
       bundles = storedBundles;
       console.log("[TabFeed][bg] hydrated bundles from storage:", bundles.length, "bundles");
     }
+    tabDailyCounts = storedDaily && typeof storedDaily === 'object' ? storedDaily : {};
   } catch (e) {
     console.warn("[TabFeed][bg] hydrateFromStorage failed:", e);
   }
@@ -556,6 +594,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         const prev = tabsIndex.get(t.id) || {};
         const merged = mergePayload(toItemFromTab(t, prev), msg.payload || {});
         tabsIndex.set(t.id, merged);
+        ensureFirstSeenFromHistory(merged);
 
         // Summarize if needed
         const sig = [(merged.url || ""), (merged.title || ""), (merged.fullText ? merged.fullText.length : 0)].join("|");
@@ -729,6 +768,15 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         return;
       }
 
+      if (msg?.type === "DELETE_BUNDLE") {
+        const idx = bundles.findIndex(b => b.id === msg.id);
+        if (idx < 0) { sendResponse?.({ ok:false }); return; }
+        bundles.splice(idx, 1);
+        await saveAndBroadcast();
+        sendResponse?.({ ok:true });
+        return;
+      }
+
       if (msg?.type === "UPDATE_BUNDLE_META") {
         const { id, summary, tips } = msg;
         const idx = bundles.findIndex(b => b.id === id);
@@ -839,6 +887,31 @@ const trackersList = [
 ];
 let lastCleanAt = 0;
 chrome.storage.local.get({lastCleanAt: 0}, (d)=>{ lastCleanAt = d.lastCleanAt || 0; });
+function dayKey(ts = Date.now()) {
+  const d = new Date(ts);
+  const y = d.getFullYear();
+  const m = String(d.getMonth()+1).padStart(2,'0');
+  const da = String(d.getDate()).padStart(2,'0');
+  return `${y}-${m}-${da}`;
+}
+async function updateDailyOpenTabsHistory() {
+  try {
+    if (!tabDailyCounts) tabDailyCounts = {};
+    const openTabs = (await chrome.tabs.query({})).filter(t => !isOwnTab(t)).length;
+    const key = dayKey();
+    const prev = tabDailyCounts[key] || 0;
+    tabDailyCounts[key] = Math.max(prev, openTabs);
+    const keys = Object.keys(tabDailyCounts).sort();
+    const keep = keys.slice(-60);
+    const next = {};
+    for (const k of keep) next[k] = tabDailyCounts[k];
+    tabDailyCounts = next;
+    await chrome.storage.local.set({ tabDailyCounts });
+    return Object.entries(tabDailyCounts).sort((a,b)=> a[0] < b[0] ? -1 : 1).map(([day,count]) => ({ day, count }));
+  } catch {
+    return [];
+  }
+}
 
 function hostname(u){ try { return new URL(u).hostname; } catch(e){ return ""; } }
 
@@ -1025,7 +1098,8 @@ async function getPrivacyFlagsForTabs() {
 async function broadcastStats(){
   const stats = await buildSessionStats();
   const flags = await getPrivacyFlagsForTabs();
-  chrome.runtime.sendMessage({type: STATS.UPDATED, stats, privacy: flags});
+  const daily = await updateDailyOpenTabsHistory();
+  chrome.runtime.sendMessage({ type: "STATS_UPDATED", stats, privacy: flags, daily }).catch(()=>{});
 }
 
 chrome.tabs.onUpdated.addListener(()=>{ broadcastStats(); });
@@ -1036,7 +1110,7 @@ chrome.webRequest.onBeforeRequest.addListener(()=>{ broadcastStats(); }, {urls:[
 
 // handle clean now
 chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
-  if (msg?.type === STATS.CLEAN_NOW) {
+  if (msg?.type === "STATS_CLEAN_NOW") {
     lastCleanAt = Date.now();
     chrome.storage.local.set({lastCleanAt});
     broadcastStats();
