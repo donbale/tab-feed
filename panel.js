@@ -412,9 +412,9 @@ function renderRail(stats, privacy, daily){
     <section class="rail-card">
       <h3>Session Stats</h3>
       <ul class="kv">
-        <li><span>Open tabs</span><span>${stats.openTabs}</span></li>
-        <li><span>Unique domains</span><span>${stats.uniqueDomains}</span></li>
-        <li><span>Memory usage</span><span>${stats.memoryEstimateMB} MB</span></li>
+        <li><span>Open tabs</span><span class="badge">${stats.openTabs - 1}</span></li>
+        <li><span>Unique domains</span><span class="badge">${stats.uniqueDomains}</span></li>
+        <li><span>Memory usage</span><span class="badge">${stats.memoryEstimateMB} MB</span></li>
       
       </ul>
       
@@ -425,7 +425,7 @@ function renderRail(stats, privacy, daily){
       <h3>Security &amp; Safety</h3>
       <ul class="kv">
         <li><span>Insecure tabs (HTTP)</span><span><span class="badge">${stats.insecureTabs||0}</span></span></li>
-        <li><span>Tabs w/ trackers</span><span><span class="badge">${stats.tabsWithTrackers||0}</span></span></li>
+        <li><span>Tabs with trackers</span><span><span class="badge">${stats.tabsWithTrackers||0}</span></span></li>
         <li><span>Potentially risky domains</span><span><span class="badge">${stats.riskyDomainsCount||0}</span></span></li>
       </ul>
       ${ (stats.riskyDomains && stats.riskyDomains.length) ? `<details><summary class="subtle">Show domains</summary><ol class="list domainlist">${stats.riskyDomains.map(h=>`<li class='domain-item'><span>${h}</span></li>`).join("")}</ol></details>` : "" }
