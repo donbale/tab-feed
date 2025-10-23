@@ -63,8 +63,13 @@ h1 {
   flex-direction: column;
   gap: 6px;
   overflow: auto;
-  max-height: calc(100vh - 140px);
 }
+
+/* Keep the main bundle tab list scrollable, but avoid huge panels */
+#bTabs { max-height: calc(100vh - 320px); }
+
+/* Add tabs list: compact panel that does not stretch with zoom */
+#addTabs { height: 220px; max-height: 220px; overflow: auto; }
 
 .summary {
   white-space: normal;

@@ -461,14 +461,14 @@ async function injectContentIntoAllTabs() {
     if (!t.id || isOwnTab(t) || !t.url) continue;
     if (t.url.startsWith("chrome://") || t.url.startsWith("edge://") || t.url.startsWith("chrome-extension://")) continue;
     try {
-      await chrome.scripting.executeScript({
-        target: { tabId: t.id },
-        files: ["content.js"]
-      });
+      // only inject into tabs for which we have host access
+      const pattern = (()=>{ try { const u=new URL(t.url); return `${u.origin}/*`; } catch { return null; } })();
+      if (!pattern) continue;
+      const has = await chrome.permissions.contains({ origins: [pattern] }).catch(()=>false);
+      if (!has) continue;
+      await chrome.scripting.executeScript({ target: { tabId: t.id }, files: ["content.js"] }).catch(()=>{});
       await chrome.tabs.sendMessage(t.id, { type: "PARSE_NOW" }).catch(() => {});
-    } catch {
-      // some pages cannot be injected — ignore
-    }
+    } catch {}
   }
 }
 
@@ -868,6 +868,22 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
 
 // ---------- Kick startup work (NO top-level await) ----------
 async function init() {
+  // Set up webRequest listeners based on current site permissions
+  updateWebRequestListeners();
+  // Register content script for granted sites; will only run where host access is granted
+  try {
+    const existing = await chrome.scripting.getRegisteredContentScripts?.() || [];
+    const has = existing.some(cs => cs.id === 'tf-content');
+    if (!has) {
+      await chrome.scripting.registerContentScripts?.([{
+        id: 'tf-content',
+        js: ['content.js'],
+        matches: ['<all_urls>'],
+        runAt: 'document_idle',
+        persistAcrossSessions: true
+      }]).catch(()=>{});
+    }
+  } catch {}
   await hydrateFromStorage();
   await reconcileAndBroadcast();
   await injectContentIntoAllTabs();
@@ -925,41 +941,66 @@ function pruneRequests(tabId){
   requestLog.set(tabId, rec);
 }
 
-chrome.webRequest.onCompleted.addListener((details) => {
-  const {tabId, url, initiator} = details;
-  if (tabId < 0) return;
-  let rec = requestLog.get(tabId) || {events:[], thirdParty:0, trackers:0, mixedContent:false};
-  rec.events.push(Date.now());
-  // third-party
-  try{
-    const uHost = new URL(url).hostname;
-    const initHost = initiator ? new URL(initiator).hostname : "";
-    if (initHost && uHost && !uHost.endsWith(initHost) && !initHost.endsWith(uHost)) {
-      rec.thirdParty++;
-    }
-    // trackers
-    if (trackersList.some(t => uHost.includes(t))) {
-      rec.trackers++;
-    }
-  }catch(e){}
-  requestLog.set(tabId, rec);
-  pruneRequests(tabId);
-}, {urls:["<all_urls>"]});
+function handleWebReqCompleted(details) {
+  try {
+    const { tabId, url, initiator } = details || {};
+    if (tabId == null || tabId < 0) return;
+    let rec = requestLog.get(tabId) || { events: [], thirdParty: 0, trackers: 0, mixedContent: false };
+    rec.events.push(Date.now());
+    try {
+      const uHost = new URL(url).hostname;
+      const initHost = initiator ? new URL(initiator).hostname : "";
+      if (initHost && uHost && !uHost.endsWith(initHost) && !initHost.endsWith(uHost)) {
+        rec.thirdParty++;
+      }
+      if (trackersList.some(t => uHost.includes(t))) {
+        rec.trackers++;
+      }
+    } catch {}
+    requestLog.set(tabId, rec);
+    pruneRequests(tabId);
+  } catch {}
+  // update rail stats opportunistically
+  broadcastStats();
+}
 
-chrome.webRequest.onBeforeRequest.addListener((details)=>{
-  // mark mixed content: main page https but subresource http
-  const {tabId, url, type, initiator} = details;
-  if (tabId < 0) return;
-  try{
-    const isHttp = url.startsWith("http://");
-    const initHttps = initiator && initiator.startsWith("https://");
+function handleWebReqBefore(details) {
+  try {
+    const { tabId, url, initiator } = details || {};
+    if (tabId == null || tabId < 0) return;
+    const isHttp = typeof url === 'string' && url.startsWith("http://");
+    const initHttps = typeof initiator === 'string' && initiator.startsWith("https://");
     if (isHttp && initHttps) {
-      const rec = requestLog.get(tabId) || {events:[], thirdParty:0, trackers:0, mixedContent:false};
+      const rec = requestLog.get(tabId) || { events: [], thirdParty: 0, trackers: 0, mixedContent: false };
       rec.mixedContent = true;
       requestLog.set(tabId, rec);
     }
-  }catch(e){}
-}, {urls:["<all_urls>"]});
+  } catch {}
+}
+
+let webReqRegistered = false;
+let webReqFilter = [];
+async function updateWebRequestListeners() {
+  try {
+    // Remove existing listeners
+    if (webReqRegistered) {
+      try { chrome.webRequest.onCompleted.removeListener(handleWebReqCompleted); } catch {}
+      try { chrome.webRequest.onBeforeRequest.removeListener(handleWebReqBefore); } catch {}
+      webReqRegistered = false;
+      webReqFilter = [];
+    }
+    // Build filter from granted origins
+    const perms = await chrome.permissions.getAll();
+    const origins = (perms && Array.isArray(perms.origins)) ? perms.origins.slice() : [];
+    // Only keep match patterns that are http(s) or <all_urls>
+    const urls = origins.filter(p => p === '<all_urls>' || p.startsWith('http://') || p.startsWith('https://'));
+    if (!urls.length) return; // nothing to register for yet
+    chrome.webRequest.onCompleted.addListener(handleWebReqCompleted, { urls });
+    chrome.webRequest.onBeforeRequest.addListener(handleWebReqBefore, { urls });
+    webReqRegistered = true;
+    webReqFilter = urls;
+  } catch {}
+}
 
 async function getMicrophoneCameraFlags(tab) {
   return new Promise((resolve) => {
@@ -1105,8 +1146,9 @@ async function broadcastStats(){
 chrome.tabs.onUpdated.addListener(()=>{ broadcastStats(); });
 chrome.tabs.onCreated.addListener(()=>{ broadcastStats(); });
 chrome.tabs.onRemoved.addListener(()=>{ broadcastStats(); });
-chrome.webRequest.onCompleted.addListener(()=>{ broadcastStats(); }, {urls:["<all_urls>"]});
-chrome.webRequest.onBeforeRequest.addListener(()=>{ broadcastStats(); }, {urls:["<all_urls>"]});
+// Rebuild webRequest listeners when permissions change
+chrome.permissions?.onAdded?.addListener(() => { updateWebRequestListeners(); });
+chrome.permissions?.onRemoved?.addListener(() => { updateWebRequestListeners(); });
 
 // handle clean now
 chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {

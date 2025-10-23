@@ -33,6 +33,7 @@ let dailyWindow = Number(localStorage.getItem('tf_daily_window') || '7');
 let latestItems = [];
 const listGrid= document.getElementById("grid"); // optional / hidden
 const nav     = document.getElementById("filters");
+const permBarId = "tf-perm-banner";
 
 // ---------- utils ----------
 function timeAgo(ts) {
@@ -353,6 +354,7 @@ async function fetchTabsFromSW() {
 }
 async function hydrate() {
   const sw = await fetchTabsFromSW();
+  await maybeRenderPermissionBanner();
   if (sw) {
     render(sw.tabs || [], sw.suggestedBundles || [], sw.bundles || []);
     return;
@@ -480,3 +482,71 @@ chrome.runtime.onMessage.addListener((msg) => {
 
 // initial ping to get stats
 chrome.runtime.sendMessage({type: "PANEL_PING"});
+// ---- Optional host access banner ----
+async function getActiveTab() {
+  try {
+    const [t] = await chrome.tabs.query({ active: true, currentWindow: true });
+    return t || null;
+  } catch { return null; }
+}
+function originPattern(u) { try { const x=new URL(u); return `${x.origin}/*`; } catch { return null; } }
+async function hasOriginAccess(u) {
+  const pat = originPattern(u); if (!pat) return false;
+  try { return await chrome.permissions.contains({ origins: [pat] }); } catch { return false; }
+}
+async function maybeRenderPermissionBanner() {
+  const headerEl = document.querySelector('.tf-header');
+  const root = document.body;
+  const existing = document.getElementById(permBarId);
+  // If we already have all-sites permission, hide banner
+  const hasAll = await chrome.permissions.contains({ origins: ["<all_urls>"] }).catch(()=>false);
+  if (hasAll) { if (existing) existing.remove(); return; }
+
+  // Build banner advising user to enable on all sites for full features
+  const bar = existing || document.createElement("div");
+  bar.id = permBarId;
+  bar.className = "banner";
+  bar.innerHTML = "";
+
+  const title = document.createElement("div");
+  title.innerHTML = `<strong>Enable Tab Feed on all sites to unlock summaries and bundles.</strong>`;
+  const meta = document.createElement("div"); meta.className = "meta"; meta.textContent = `You can also enable per‑site if preferred.`;
+  const row = document.createElement("div"); row.className = "row";
+  const btnAll  = document.createElement("button"); btnAll.textContent = "Enable on all sites";
+  const btnSite = document.createElement("button"); btnSite.textContent = "Enable on this site"; btnSite.className = "secondary";
+
+  const tab = await getActiveTab();
+  const sitePat = tab && tab.url ? originPattern(tab.url) : null;
+
+  btnAll.onclick = async () => {
+    const ok = await chrome.permissions.request({ origins: ["<all_urls>"] });
+    if (ok) {
+      bar.remove();
+      chrome.runtime.sendMessage({ type: "PANEL_OPENED" }).catch(()=>{});
+      hydrate();
+    }
+  };
+  btnSite.onclick = async () => {
+    if (!sitePat) return;
+    const ok = await chrome.permissions.request({ origins: [sitePat] });
+    if (ok) {
+      // keep banner if we still don't have all-sites, but it will allow current site features to work
+      chrome.runtime.sendMessage({ type: "PANEL_OPENED" }).catch(()=>{});
+      hydrate();
+    }
+  };
+
+  row.appendChild(btnAll);
+  if (sitePat) row.appendChild(btnSite);
+  bar.appendChild(title);
+  bar.appendChild(meta);
+  bar.appendChild(row);
+
+  if (!existing) {
+    if (headerEl && headerEl.parentElement) {
+      headerEl.parentElement.insertBefore(bar, headerEl);
+    } else {
+      root.prepend(bar);
+    }
+  }
+}

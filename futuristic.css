@@ -205,6 +205,17 @@ button.secondary{
   padding: 4px 8px;
   line-height: 1.1;
 }
+/* Ensure the Add search input stays compact and does not stretch */
+#addSearch{
+  display: block;
+  height: 36px !important;
+  max-height: 36px !important;
+  min-height: 36px !important;
+  padding: 8px 12px;
+  line-height: 20px;
+  resize: none;
+  box-sizing: border-box;
+}
 /* Make Remove buttons in bundle list compact as well */
 #bTabs button{
   font-size: 11px;
