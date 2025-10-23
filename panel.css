@@ -19,6 +19,8 @@ html, body { margin:0; padding:0; background:var(--bg); color:#e6eefc; font:14px
 .tf-header .brand { font-weight:800; letter-spacing: .2px; color:var(--brand); font-family: inherit; }
 .tf-header .brand { display:inline-flex; align-items:center; gap:8px; }
 .tf-header .brand-icon { width:18px; height:18px; border-radius:4px; display:block; }
+.tf-header .privacy-link { margin-left: 12px; color: var(--muted); text-decoration: none; font-size: 12px; }
+.tf-header .privacy-link:hover { text-decoration: underline; }
 .tf-header .meta  { color:var(--muted); }
 
 .tf-nav { display:flex; gap:.5rem; flex-wrap:wrap; padding:10px 14px; border-bottom:1px solid var(--border); }
