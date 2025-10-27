@@ -64,13 +64,12 @@
 
       <h2>Permissions Rationale</h2>
       <ul>
-        <li><code>tabs</code>, <code>tabGroups</code>: enumerate open tabs and manage pin/focus/close; group related work.</li>
+        <li><code>tabs</code>: enumerate open tabs and manage pin/focus/close.</li>
         <li><code>scripting</code>: inject the content script on pages you visit to extract article text (when permitted by the page).</li>
         <li><code>storage</code>: persist local state (tabs, bundles, summaries, settings).</li>
         <li><code>history</code>: compute “first opened” times for tabs more accurately by checking earliest visit.</li>
         <li><code>webRequest</code> (non‑blocking): aggregate high‑level request counts for session stats (no request is blocked or modified).</li>
         <li><code>contentSettings</code>: optionally show mic/camera allowance flags for the current tab’s site.</li>
-        <li><code>system.memory</code>: display a coarse memory estimate for active sessions.</li>
       </ul>
 
       <h2>Third‑Party Sharing</h2>

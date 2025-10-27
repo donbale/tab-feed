@@ -29,13 +29,12 @@ Nothing is uploaded to external services by the extension.
 - Summaries and tips are generated using browser‑provided on‑device models when available (e.g., `window.ai`). Where not available, features may be disabled or fall back to simple local heuristics. No content is sent to remote AI services by this extension.
 
 ## Permissions Rationale
-- `tabs`, `tabGroups`: enumerate open tabs and manage pin/focus/close; group related work.
+- `tabs`: enumerate open tabs and manage pin/focus/close.
 - `scripting`: inject the content script on pages you visit to extract article text (when permitted by the page).
 - `storage`: persist local state (tabs, bundles, summaries, settings).
 - `history`: compute “first opened” times for tabs more accurately by checking earliest visit.
 - `webRequest` (non‑blocking): aggregate high‑level request counts for session stats (no request is blocked or modified).
 - `contentSettings`: optionally show mic/camera allowance flags for the current tab’s site.
-- `system.memory`: display a coarse memory estimate for active sessions.
 
 If you prefer to reduce permissions, you may fork and remove certain features (e.g., request statistics or mic/camera flags) and the corresponding permissions.
 
