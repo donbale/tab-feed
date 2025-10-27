@@ -7,8 +7,6 @@
     "contentSettings",
     "scripting",
     "storage",
-    "system.memory",
-    "tabGroups",
     "tabs",
     "webRequest",
     "history"

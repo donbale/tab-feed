@@ -64,13 +64,12 @@ If the API is unavailable, features gracefully degrade (e.g., actionable tips fa
 This extension works locally and stores state in chrome.storage.local. It does not transmit browsing data to remote servers.
 
 Requested permissions are used for visible features:
-- tabs, tabGroups: enumerate and manage tab metadata and actions
+- tabs: enumerate and manage tab metadata and actions
 - scripting: inject content script to extract page text for summaries
 - storage: persist local state (tabs, bundles, summaries)
 - history: compute “first opened” times via earliest visit
 - webRequest (non‑blocking): aggregate counts for session stats
 - contentSettings: optionally show mic/camera allowances in the rail
-- system.memory: coarse memory estimate for the session
 
 See PRIVACY.md for full details.
 
