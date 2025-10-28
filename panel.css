@@ -170,3 +170,15 @@ html, body { margin:0; padding:0; background:var(--bg); color:#e6eefc; font:14px
 
 /* domain list for risky domains */
 .domainlist { margin-top:.5rem; }
+
+/* Mic ON state */
+.mic-button.mic-on {
+    background-color: red;
+    color: white;
+}
+
+/* Cam ON state */
+.cam-button.cam-on {
+    background-color: red;
+    color: white;
+}
