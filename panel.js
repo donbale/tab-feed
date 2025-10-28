@@ -251,9 +251,9 @@ function card(it, { variant="standard" } = {}) {
   if (it.summary) {
     sum.textContent = mdToText(it.summary);
   } else if (it.fullText && it.fullText.length >= 120) {
-    sum.textContent = "Generating TL;DR…";
+    sum.textContent = "Generating TL;DR...";
   } else if (it.fullText) {
-    sum.textContent = "Not enough text yet…";
+    sum.textContent = "Not enough text yet...";
   } else {
     sum.textContent = "No article text extracted yet.";
   }
@@ -274,8 +274,14 @@ function card(it, { variant="standard" } = {}) {
     pv.appendChild(mk("Trackers", pf.trackers||0, (pf.trackers||0)>0));
     pv.appendChild(mk("3rd‑party", pf.thirdParty||0));
     pv.appendChild(mk("Mixed", pf.mixedContent ? "yes" : "no", !!pf.mixedContent));
-    pv.appendChild(mk("Mic", pf.micAllowed ? "on" : "off", !!pf.micAllowed));
-    pv.appendChild(mk("Cam", pf.camAllowed ? "on" : "off", !!pf.camAllowed));
+    let micBtn = mk("Mic", pf.micAllowed ? "on" : "off", !!pf.micAllowed);
+micBtn.classList.add("mic-button");
+if (pf.micAllowed) { micBtn.classList.add("mic-on"); }
+pv.appendChild(micBtn);
+    let camBtn = mk("Cam", pf.camAllowed ? "on" : "off", !!pf.camAllowed);
+camBtn.classList.add("cam-button");
+if (pf.camAllowed) { camBtn.classList.add("cam-on"); }
+pv.appendChild(camBtn);
     el.appendChild(pv);
   }
 el.appendChild(actionsBar(it));
@@ -313,7 +319,7 @@ function renderSuggestions(suggestedBundles = [], tabsById) {
     const banner = document.createElement("div");
     banner.className = "banner";
     const title = document.createElement("div");
-    title.innerHTML = `<strong>It looks like you're working on “${bundle.title}”.</strong>`;
+    title.innerHTML = `<strong>It looks like you're working on "${bundle.title}".</strong>`;
     const meta = document.createElement("div");
     meta.className = "meta";
     const names = bundle.tabIds.map(id => (tabsById.get(id)?.title || "Untitled")).join(" • ");
@@ -489,7 +495,13 @@ async function getActiveTab() {
     return t || null;
   } catch { return null; }
 }
-function originPattern(u) { try { const x=new URL(u); return `${x.origin}/*`; } catch { return null; } }
+function originPattern(u) {
+  try {
+    const x = new URL(u);
+    if (!/^https?:$/.test(x.protocol)) return null; // only allow http/https origins for permissions
+    return `${x.origin}/*`;
+  } catch { return null; }
+}
 async function hasOriginAccess(u) {
   const pat = originPattern(u); if (!pat) return false;
   try { return await chrome.permissions.contains({ origins: [pat] }); } catch { return false; }
