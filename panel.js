@@ -444,17 +444,6 @@ function renderRail(stats, privacy, daily){
       <h3>Top Domains</h3>
       <ol class="list">${domains || "<li>No data</li>"}</ol>
     </section>
-
-    <section class="rail-card">
-      <h3>Quick Chips</h3>
-      <div class="chips">${chips}</div>
-    </section>
-
-    <section class="rail-card">
-      <h3>Focus — Context score <span class="badge">${ctx}</span></h3>
-      <p class="subtle">${nudge}</p>
-      <ol class="list hotlist">${hotList || "<li class='domain-item'>No hot tabs</li>"}</ol>
-    </section>
   `;
 
   // no selector; static age buckets
