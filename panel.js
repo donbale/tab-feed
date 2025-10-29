@@ -1,4 +1,4 @@
-
+﻿
 let latestPrivacy = {};
 // ---- escapeHTML guard ----
 if (typeof escapeHTML === "undefined") {
@@ -20,7 +20,7 @@ if (typeof STATS === "undefined") {
   var STATS = { UPDATED: "STATS_UPDATED", CLEAN_NOW: "STATS_CLEAN_NOW" };
 }
 
-// panel.js — Front Page + Reading-time badges
+// panel.js ” Front Page + Reading-time badges
 
 const counts = document.getElementById("counts");
 const elHero  = document.getElementById("region-hero");
@@ -34,6 +34,43 @@ let latestItems = [];
 const listGrid= document.getElementById("grid"); // optional / hidden
 const nav     = document.getElementById("filters");
 const permBarId = "tf-perm-banner";
+
+// ---- On-page summarizer (panel context) ----
+let panelSummarizer = null;
+let panelSummQueue = [];
+let panelSummRunning = false;
+const SUMM_LANG = 'en';
+async function getPanelSummarizer() {
+  try {
+    const API = (globalThis.Summarizer || (globalThis.ai && globalThis.ai.summarizer));
+    if (!API) return null;
+    const caps = API.capabilities ? await API.capabilities() : (API.availability ? await API.availability() : null);
+    if (!caps || caps.available === 'no') return null;
+    if (!panelSummarizer) {
+      // Keep create minimal for compatibility; always specify output language
+      panelSummarizer = await API.create({ type: 'key-points', length: 'short', output: { language: SUMM_LANG } });
+    }
+    return panelSummarizer;
+  } catch { return null; }
+}
+async function runPanelSummaries() {
+  if (panelSummRunning) return;
+  panelSummRunning = true;
+  const inst = await getPanelSummarizer();
+  if (!inst) { panelSummQueue = []; panelSummRunning = false; return; }
+  while (panelSummQueue.length) {
+    const item = panelSummQueue.shift();
+    try {
+      // Keep summarize options minimal; always pass output language
+      const out = await inst.summarize((item.fullText || '').slice(0, 1200), { output: { language: SUMM_LANG } });
+      const summary = typeof out === 'string' ? out : (out && out.summary) || '';
+      if (summary) {
+        chrome.runtime.sendMessage({ type: 'TAB_SUMMARY_FROM_PANEL', tabId: item.tabId, summary }).catch(()=>{});
+      }
+    } catch {}
+  }
+  panelSummRunning = false;
+}
 
 // ---------- utils ----------
 function timeAgo(ts) {
@@ -52,7 +89,7 @@ function mdToText(md = "") {
     .replace(/\*\*(.*?)\*\*/g, "$1")
     .replace(/\*(.*?)\*/g, "$1")
     .replace(/`(.*?)`/g, "$1")
-    .replace(/^\s*[-*]\s+/gm, "• ")
+    .replace(/^\s*[-*]\s+/gm, "- ")
     .trim();
 }
 function score(it) {
@@ -96,7 +133,10 @@ function renderFilters(items, bundles = []) {
   const countsMap = new Map();
   for (const it of items) {
     const cats = Array.isArray(it.categories) ? it.categories : [];
-    for (const c of cats) countsMap.set(c, (countsMap.get(c) || 0) + 1);
+    for (const c of cats) {
+      if (c === 'Other') continue; // hide generic bucket from navigation
+      countsMap.set(c, (countsMap.get(c) || 0) + 1);
+    }
   }
   nav.innerHTML = "";
 
@@ -104,11 +144,11 @@ function renderFilters(items, bundles = []) {
     const b = document.createElement("button");
     b.textContent = label; if (on) b.classList.add("active"); b.onclick = handler; return b;
   };
-  nav.appendChild(makeBtn(activeFilter ? "All" : "All ✓", !activeFilter, () => { activeFilter = null; hydrate(); }));
+  nav.appendChild(makeBtn(activeFilter ? "All" : "All", !activeFilter, () => { activeFilter = null; hydrate(); }));
 
-  const preferredOrder = CATEGORY_ENUM.filter(c => countsMap.has(c));
+  const preferredOrder = CATEGORY_ENUM.filter(c => c !== 'Other' && countsMap.has(c));
   for (const c of preferredOrder) {
-    nav.appendChild(makeBtn(activeFilter === c ? `${c} ✓` : c, activeFilter === c,
+    nav.appendChild(makeBtn(activeFilter === c ? `${c}` : c, activeFilter === c,
       () => { activeFilter = (activeFilter === c ? null : c); hydrate(); }));
   }
 
@@ -121,7 +161,7 @@ function renderFilters(items, bundles = []) {
   for (const bundle of bundles) {
     const btn = document.createElement("a");
     btn.className = "tf-nav-btn"; // new class for styling
-    btn.textContent = `🗂️ ${bundle.title}`;
+    const ic = document.createElement("span"); ic.className="icon-bundle"; ic.setAttribute("aria-hidden","true"); btn.appendChild(ic); btn.appendChild(document.createTextNode(" " + (bundle.title || "Bundle")));
     btn.href = `bundle.html?id=${bundle.id}`;
     nav.appendChild(btn);
   }
@@ -129,6 +169,8 @@ function renderFilters(items, bundles = []) {
 
 // ---------- UI helpers ----------
 function chipBar(cats=[]) {
+  // Filter out the generic "Other" category from display
+  cats = (cats || []).filter(c => c && c !== 'Other');
   if (!cats.length) return null;
   const wrap = document.createElement("div");
   wrap.className = "chips";
@@ -155,16 +197,8 @@ function badgesRow(it) {
   const minutes = (typeof it.readingMinutes === "number")
     ? it.readingMinutes
     : (it.fullText ? estimateReadingMinutes(it.fullText) : null);
-  if (minutes != null) rt.textContent = `~${minutes} min`; else rt.textContent = "~— min";
+  if (minutes != null) rt.textContent = `~${minutes} min`; else rt.textContent = "~? min";
   row.appendChild(rt);
-
-  // Tab age (since firstSeen)
-  const age = document.createElement("span");
-  age.className = "chip";
-  const first = it.firstSeen || it.updatedAt || Date.now();
-  age.textContent = `opened ${timeAgo(first)}`;
-  row.appendChild(age);
-
   // if we computed locally but not saved yet, persist
   if (it.tabId && it.fullText && it.readingMinutes == null && minutes != null) {
     chrome.runtime.sendMessage({ type: "TAB_READINGTIME_FROM_PANEL", tabId: it.tabId, minutes }).catch(()=>{});
@@ -178,37 +212,51 @@ function actionsBar(it) {
   const actions = document.createElement("div");
   actions.className = "actions";
 
-  const btn = (txt, handler) => {
+  const btn = (txt, handler, title) => {
     const b = document.createElement("button");
     b.textContent = txt;
+    if (title) b.title = title;
     b.onclick = (e) => { e.stopPropagation(); handler(); };
     return b;
   };
 
-  const link = document.createElement("a");
-  link.href = it.url;
-  link.target = "_blank";
-  link.rel = "noreferrer";
-  link.textContent = "Open";
-  link.onclick = (e) => e.stopPropagation();
+  // No separate text link — we render an icon button with tooltip
 
-  actions.appendChild(btn("Focus", () =>
-    chrome.runtime.sendMessage({ type: "FOCUS_TAB", tabId: it.tabId, windowId: it.windowId })
-  ));
-  actions.appendChild(btn(it.pinned ? "Unpin" : "Pin", () =>
-    chrome.runtime.sendMessage({ type: "PIN_TOGGLE", tabId: it.tabId })
-  ));
-  actions.appendChild(btn("Close", () =>
-    chrome.runtime.sendMessage({ type: "CLOSE_TAB", tabId: it.tabId })
-  ));
+  // helpers for SVG icon buttons
+  const iconBtn = (title, paths, handler) => {
+    const b = document.createElement('button');
+    b.className = 'icon-btn';
+    b.title = title;
+    b.onclick = (e)=>{ e.stopPropagation(); handler(); };
+    const svgNS = 'http://www.w3.org/2000/svg';
+    const svg = document.createElementNS(svgNS, 'svg');
+    svg.setAttribute('viewBox','0 0 24 24');
+    svg.setAttribute('width','16'); svg.setAttribute('height','16');
+    svg.setAttribute('fill','none'); svg.setAttribute('stroke','currentColor');
+    svg.setAttribute('stroke-width','2'); svg.setAttribute('stroke-linecap','round'); svg.setAttribute('stroke-linejoin','round');
+    (Array.isArray(paths)?paths:[paths]).forEach(d=>{ const p=document.createElementNS(svgNS,'path'); p.setAttribute('d',d); svg.appendChild(p); });
+    b.appendChild(svg);
+    return b;
+  };
 
-  // Related search on every tab
-  actions.appendChild(btn("Related search", () => {
+  // Related search first (magnifying glass)
+  actions.appendChild(iconBtn('Related search', ['M11 4a7 7 0 1 0 0 14 7 7 0 0 0 0-14','M21 21l-4.35-4.35'], () => {
     const url = buildRelatedQuery(it);
     chrome.tabs.create({ url });
   }));
 
-  actions.appendChild(link);
+  // Pin/Unpin next (map-pin)
+  actions.appendChild(iconBtn(it.pinned ? 'Unpin' : 'Pin', ['M21 10c0 6-9 13-9 13S3 16 3 10a9 9 0 1 1 18 0z','M12 7a3 3 0 1 0 0 6 3 3 0 0 0 0-6z'], () =>
+    chrome.runtime.sendMessage({ type: 'PIN_TOGGLE', tabId: it.tabId })
+  ));
+
+  // Close (X)
+  actions.appendChild(iconBtn('Close', ['M18 6 6 18','M6 6l12 12'], () =>
+    chrome.runtime.sendMessage({ type: 'CLOSE_TAB', tabId: it.tabId })
+  ));
+  // External link icon for open
+  const openBtn = iconBtn('Open', ['M14 3h7v7','M21 3l-9 9'], () => { if (it.url) chrome.tabs.create({ url: it.url }); });
+  actions.appendChild(openBtn);
   return actions;
 }
 
@@ -228,10 +276,11 @@ function card(it, { variant="standard" } = {}) {
   const h = document.createElement("h2");
   h.textContent = it.title || it.url;
   el.appendChild(h);
-
   const meta = document.createElement("div");
   meta.className = "meta";
-  meta.textContent = `${it.domain || ""} • ${timeAgo(it.updatedAt)}`;
+  // Prefer earliest history-backed time for display
+  const openedAt = it.firstSeenHistory || it.firstSeen || it.updatedAt || Date.now();
+  meta.textContent = `${it.domain || ""} - opened ${timeAgo(openedAt)}`;
   el.appendChild(meta);
 
   const cats = chipBar(it.categories || []);
@@ -271,18 +320,12 @@ function card(it, { variant="standard" } = {}) {
       sp.textContent = `${label}: ${value}`;
       return sp;
     };
-    pv.appendChild(mk("Trackers", pf.trackers||0, (pf.trackers||0)>0));
-    pv.appendChild(mk("3rd‑party", pf.thirdParty||0));
-    pv.appendChild(mk("Mixed", pf.mixedContent ? "yes" : "no", !!pf.mixedContent));
-    let micBtn = mk("Mic", pf.micAllowed ? "on" : "off", !!pf.micAllowed);
-micBtn.classList.add("mic-button");
-if (pf.micAllowed) { micBtn.classList.add("mic-on"); }
-pv.appendChild(micBtn);
-    let camBtn = mk("Cam", pf.camAllowed ? "on" : "off", !!pf.camAllowed);
-camBtn.classList.add("cam-button");
-if (pf.camAllowed) { camBtn.classList.add("cam-on"); }
-pv.appendChild(camBtn);
-    el.appendChild(pv);
+    if ((pf.trackers||0) > 0) pv.appendChild(mk("Trackers", pf.trackers||0, true));
+    if ((pf.thirdParty||0) > 0) pv.appendChild(mk("3rd party", pf.thirdParty||0, true));
+    if (pf.mixedContent) pv.appendChild(mk("Mixed", "yes", true));
+    if (pf.micAllowed) pv.appendChild(mk("Mic", "on", true));
+    if (pf.camAllowed) pv.appendChild(mk("Cam", "on", true));
+    if (pv.childElementCount) el.appendChild(pv);
   }
 el.appendChild(actionsBar(it));
 
@@ -294,19 +337,11 @@ function renderFront(items) {
   const source = activeFilter ? items.filter(it => (it.categories || []).includes(activeFilter)) : items;
   counts.textContent = `${source.length} open tab${source.length === 1 ? "" : "s"}`;
 
-  const sorted = [...source].sort((a,b) => score(b)-score(a));
-  const hero = sorted.find(x => x.heroImage || x.summary) || sorted[0];
-  const rest = sorted.filter(x => x !== hero);
-  const leads = rest.slice(0, 3);
-  const afterLeads = rest.slice(3);
-  const main  = afterLeads.slice(0, 17);
-  // Keep the rail dedicated to session stats; do not place tab cards there.
-
-  // Clear content in hero, leads, and main — but leave the rail intact
+  // Render all cards uniformly in the main region (no hero panel)
+  // Use a stable order so cards don't shuffle around on updates
+  const sorted = [...source].sort((a,b) => (a.firstSeen||a.updatedAt||0) - (b.firstSeen||b.updatedAt||0));
   elHero.innerHTML = elLeads.innerHTML = elMain.innerHTML = "";
-  if (hero) elHero.appendChild(card(hero, { variant:"hero" }));
-  for (const it of leads) elLeads.appendChild(card(it));
-  for (const it of main)  elMain.appendChild(card(it));
+  for (const it of sorted) elMain.appendChild(card(it));
 }
 
 function renderSuggestions(suggestedBundles = [], tabsById) {
@@ -322,17 +357,33 @@ function renderSuggestions(suggestedBundles = [], tabsById) {
     title.innerHTML = `<strong>It looks like you're working on "${bundle.title}".</strong>`;
     const meta = document.createElement("div");
     meta.className = "meta";
-    const names = bundle.tabIds.map(id => (tabsById.get(id)?.title || "Untitled")).join(" • ");
-    meta.textContent = `${bundle.tabIds.length} tabs match • e.g., ${names}`;
+    const names = bundle.tabIds.map(id => (tabsById.get(id)?.title || "Untitled")).join(" - ");
+    meta.textContent = `${bundle.tabIds.length} tabs match - e.g., ${names}`;
+    const buttonsRow = document.createElement('div');
+    buttonsRow.className = 'row';
     const button = document.createElement("button");
     button.textContent = "Create bundle";
     button.onclick = () => {
       chrome.runtime.sendMessage({ type: "CREATE_BUNDLE", ...bundle });
       el.innerHTML = ""; // Hide suggestions after creating a bundle
     };
+    const dismiss = document.createElement("button");
+    dismiss.className = "secondary";
+    dismiss.textContent = "Dismiss";
+    dismiss.onclick = async () => {
+      const key = `${bundle.title}|${(bundle.tabIds||[]).slice().sort((a,b)=>a-b).join(',')}`;
+      try {
+        const { suggestedBundles: sb=[] } = await chrome.storage.local.get(["suggestedBundles"]);
+        const filtered = (Array.isArray(sb) ? sb : []).filter(b => `${b.title}|${(b.tabIds||[]).slice().sort((a,b)=>a-b).join(',')}` !== key);
+        await chrome.storage.local.set({ suggestedBundles: filtered });
+      } catch {}
+      banner.remove();
+    };
+    buttonsRow.appendChild(button);
+    buttonsRow.appendChild(dismiss);
     banner.appendChild(title);
     banner.appendChild(meta);
-    banner.appendChild(button);
+    banner.appendChild(buttonsRow);
     el.appendChild(banner);
   }
 }
@@ -340,6 +391,14 @@ function renderSuggestions(suggestedBundles = [], tabsById) {
 
 
 function render(items, suggestedBundles = [], bundles = []) {
+  // Queue panel-side summaries for items missing summary
+  try {
+    const need = (items||[]).filter(it => it.fullText && it.fullText.length >= 120 && !it.summary);
+    const queuedIds = new Set(panelSummQueue.map(x=>x.tabId));
+    for (const it of need) { if (!queuedIds.has(it.tabId)) panelSummQueue.push(it); }
+    runPanelSummaries();
+  } catch {}
+  latestItems = Array.isArray(items) ? items : [];
   const anyCats = items.some(it => Array.isArray(it.categories) && it.categories.length);
   renderFilters(items, bundles);
   if (listGrid) listGrid.hidden = true;
@@ -391,8 +450,8 @@ function renderRail(stats, privacy, daily){
 
   // Context nudge
   const ctx = stats.contextScore ?? 100;
-  const nudge = ctx < 40 ? "Your tabs look scattered — consider grouping or closing a few outliers." :
-                ctx < 70 ? "A bit of a mix — grouping related work could help focus." :
+  const nudge = ctx < 40 ? "Your tabs look scattered” consider grouping or closing a few outliers." :
+                ctx < 70 ? "A bit of a mix” grouping related work could help focus." :
                            "Nice! Your current tabs are fairly cohesive.";
 
   // Category chips
@@ -401,7 +460,10 @@ function renderRail(stats, privacy, daily){
 
   // Tab age buckets from current open items
   const now = Date.now();
-  const ageMs = (it) => now - (it.firstSeen || it.updatedAt || now);
+  const ageMs = (it) => {
+    const t0 = it.firstSeenHistory || it.firstSeen || it.updatedAt || now;
+    return now - t0;
+  };
   const olderThan = (days) => latestItems.filter(it => ageMs(it) >= days*24*60*60*1000).length;
   const older7  = olderThan(7);
   const older14 = olderThan(14);
@@ -458,7 +520,7 @@ function renderRail(stats, privacy, daily){
       const which = ch.dataset.chip;
       // simple broadcast: filter main grid by category using existing list if present
       // You can hook into your existing filters if available.
-      alert("Filter by " + which + " — hook into your list rendering to apply.");
+      alert("Filter by " + which + " hook into your list rendering to apply.");
     });
   });
 }
@@ -498,7 +560,10 @@ async function hasOriginAccess(u) {
 async function maybeRenderPermissionBanner() {
   const headerEl = document.querySelector('.tf-header');
   const root = document.body;
-  const existing = document.getElementById(permBarId);
+  // Strong de-dupe: if multiple exist, remove extras
+  const existingAll = Array.from(document.querySelectorAll(`#${permBarId}`));
+  for (let i = 1; i < existingAll.length; i++) existingAll[i].remove();
+  const existing = existingAll[0] || null;
   // If we already have all-sites permission, hide banner
   const hasAll = await chrome.permissions.contains({ origins: ["<all_urls>"] }).catch(()=>false);
   if (hasAll) { if (existing) existing.remove(); return; }
@@ -511,7 +576,7 @@ async function maybeRenderPermissionBanner() {
 
   const title = document.createElement("div");
   title.innerHTML = `<strong>Enable Tab Feed on all sites to unlock summaries and bundles.</strong>`;
-  const meta = document.createElement("div"); meta.className = "meta"; meta.textContent = `You can also enable per‑site if preferred.`;
+  const meta = document.createElement("div"); meta.className = "meta"; meta.textContent = `You can also enable per site if preferred.`;
   const row = document.createElement("div"); row.className = "row";
   const btnAll  = document.createElement("button"); btnAll.textContent = "Enable on all sites";
   const btnSite = document.createElement("button"); btnSite.textContent = "Enable on this site"; btnSite.className = "secondary";
@@ -551,3 +616,7 @@ async function maybeRenderPermissionBanner() {
     }
   }
 }
+
+
+
+

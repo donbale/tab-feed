@@ -1,4 +1,4 @@
-// background.js — TabFeed (panel-only AI, persistent storage, stable updates)
+﻿// background.js ΓÇö TabFeed (panel-only AI, persistent storage, stable updates)
 console.log("[TabFeed] background boot", new Date().toISOString());
 
 // ---------- Constants ----------
@@ -64,7 +64,18 @@ ${existingBundleTitles}`;
     }
 
     if (Array.isArray(parsed)) {
-      suggestedBundles = parsed.filter(b => b.title && Array.isArray(b.tabIds) && b.tabIds.length >= 3);
+      // Accept valid bundles then filter out ones too similar to existing bundles
+      const raw = parsed.filter(b => b.title && Array.isArray(b.tabIds) && b.tabIds.length >= 3);
+      const existing = bundles.map(b => ({ id: b.id, title: b.title, tabIds: Array.isArray(b.tabIds) ? b.tabIds.slice() : [] }));
+      function jaccard(a, b) {
+        const A = new Set(a), B = new Set(b);
+        let inter = 0; for (const x of A) if (B.has(x)) inter++;
+        const uni = new Set([...A, ...B]).size || 1;
+        return inter / uni;
+      }
+      suggestedBundles = raw.filter(sug => {
+        return !existing.some(ex => jaccard(sug.tabIds, ex.tabIds) >= 0.7);
+      });
     } else {
       suggestedBundles = [];
     }
@@ -353,15 +364,16 @@ async function ensureFirstSeenFromHistory(it) {
     const visits = await chrome.history.getVisits({ url });
     if (Array.isArray(visits) && visits.length) {
       const earliest = Math.min.apply(null, visits.map(v => v.visitTime || Date.now()));
-      const existing = it.firstSeen || it.updatedAt || Date.now();
-      if (earliest && earliest < existing) {
-        const cur = tabsIndex.get(it.tabId);
-        if (cur) {
-          cur.firstSeen = earliest;
-          cur.updatedAt = Date.now();
-          tabsIndex.set(it.tabId, cur);
-          scheduleSaveAndBroadcast();
-        }
+      const cur = tabsIndex.get(it.tabId);
+      if (cur && earliest) {
+        // Persist explicit history-based timestamp
+        cur.firstSeenHistory = earliest;
+        // Keep firstSeen as the minimum of known values so other code stays consistent
+        const existing = cur.firstSeen || it.updatedAt || Date.now();
+        cur.firstSeen = Math.min(existing, earliest);
+        cur.updatedAt = Date.now();
+        tabsIndex.set(it.tabId, cur);
+        scheduleSaveAndBroadcast();
       }
     }
   } catch (e) {
@@ -586,6 +598,22 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       if (msg?.type === "GET_TABS_NOW") {
         const { tabs = [], suggestedBundles = [], bundles = [] } = await chrome.storage.local.get(["tabs", "suggestedBundles", "bundles"]);
         sendResponse?.({ ok: true, tabs, suggestedBundles, bundles }); return;
+      }
+
+      // Summary updates arriving from the panel (page context)
+      if (msg?.type === "TAB_SUMMARY_FROM_PANEL") {
+        try {
+          const { tabId, summary } = msg;
+          const it = tabsIndex.get(tabId);
+          if (it && typeof summary === 'string' && summary.trim()) {
+            it.summary = summary;
+            it.updatedAt = Date.now();
+            tabsIndex.set(tabId, it);
+            await saveAndBroadcast();
+          }
+        } catch {}
+        sendResponse?.({ ok: true });
+        return;
       }
 
       if (msg?.type === "TAB_CONTENT" && sender.tab?.id != null) {
