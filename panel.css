@@ -7,19 +7,46 @@
   --border: #25334a;
   --chip: #213047;
   --brand: #f4d35e;
+
   /* layout tokens */
   --container-max: 1280px;
   --container-pad: 16px;
+  /* edge gap controls the outer left/right margin; set to 50% of container-pad */
+  --edge-gap: calc(var(--container-pad) / 2);
   --section-radius: 20px;
 }
 
 * { box-sizing: border-box; }
-html, body { margin:0; padding:0; background:var(--bg); color:#e6eefc; font:14px/1.5 "Google Sans", Roboto, "Noto Sans", "Segoe UI", -apple-system, BlinkMacSystemFont, "Helvetica Neue", Arial, sans-serif; }
+html, body {
+  margin:0; padding:0; background:var(--bg); color:#e6eefc;
+  font:14px/1.5 "Google Sans", Roboto, "Noto Sans", "Segoe UI", -apple-system, BlinkMacSystemFont, "Helvetica Neue", Arial, sans-serif;
+}
 
+/* ===================== */
+/*  Shared CONTAINER rule */
+/* ===================== */
+.tf-header,
+.tf-nav,
+.banner,
+.tf-front,
+.tf-wrap {
+  width: min(var(--container-max), 100% - calc(var(--edge-gap) * 2));
+  margin-inline: auto;
+  box-sizing: border-box;
+  padding-inline: var(--container-pad);
+}
+
+/* Remove any older margins that could misalign widths */
+.tf-header,
+.tf-nav,
+.banner { margin-inline: auto; }
+
+/* Header */
 .tf-header {
   display:flex; justify-content:space-between; align-items:center;
-  padding:10px var(--container-pad); border-bottom:1px solid var(--border);
-  position: static; /* no sticky header */
+  padding:10px var(--container-pad);
+  border-bottom:1px solid var(--border);
+  position: static; /* non-sticky */
   background:linear-gradient(180deg, rgba(11,18,32,.96), rgba(11,18,32,.92));
   border-radius: var(--section-radius);
 }
@@ -30,7 +57,13 @@ html, body { margin:0; padding:0; background:var(--bg); color:#e6eefc; font:14px
 .tf-header .privacy-link:hover { text-decoration: underline; }
 .tf-header .meta  { color:var(--muted); }
 
-.tf-nav { display:flex; gap:.5rem; flex-wrap:wrap; padding:10px var(--container-pad); border-bottom:1px solid var(--border); border-radius: var(--section-radius); }
+/* Nav */
+.tf-nav {
+  display:flex; gap:.5rem; flex-wrap:wrap;
+  padding:10px var(--container-pad);
+  border-bottom:1px solid var(--border);
+  border-radius: var(--section-radius);
+}
 .tf-nav button {
   padding:.32rem .7rem; border:1px solid var(--border); border-radius:999px;
   background:var(--chip); color:#dbe8ff; cursor:pointer;
@@ -50,17 +83,11 @@ html, body { margin:0; padding:0; background:var(--bg); color:#e6eefc; font:14px
   background-image: url('data:image/svg+xml;utf8,<svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="%23dbe8ff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 7h5l2 2h9v8a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2z"/><path d="M4 7v10a2 2 0 0 0 2 2h12"/></svg>');
   background-size: contain; background-repeat:no-repeat;
 }
+.tf-nav-btn:hover { background: #1d2b43; }
 
-.tf-nav-btn:hover {
-  background: #1d2b43;
-}
+.separator { width: 1px; background-color: var(--border); margin: 0 8px; }
 
-.separator {
-  width: 1px;
-  background-color: var(--border);
-  margin: 0 8px;
-}
-
+/* Front layout */
 .tf-front {
   display:grid;
   grid-template-columns: 1.15fr 1fr 320px;
@@ -87,26 +114,13 @@ html, body { margin:0; padding:0; background:var(--bg); color:#e6eefc; font:14px
 /* Hide empty hero/leads sections to remove stray borders/gaps */
 .tf-hero:empty, .tf-leads:empty { display: none; }
 
-/* Shared container width and alignment for top sections */
-.tf-header,
-.tf-nav,
-.banner,
-.tf-front {
-  width: min(var(--container-max), 100% - calc(var(--container-pad) * 2));
-  margin-inline: auto;
-  box-sizing: border-box;
-}
-
-/* Ensure no stray inline margins override alignment */
-.tf-header { margin-inline: auto; }
-.tf-nav    { margin-inline: auto; }
-.banner    { margin-inline: auto; }
-
-/* --- Bottom spacing cleanup --- */
+/* --- Bottom spacing cleanup (fix units) --- */
 html, body, .tf-wrap, .tf-front {
   margin-bottom: 0 !important;
   padding-bottom: 0 !important;
 }
+/* Small, consistent bottom gap below the front panel */
+.tf-front { margin-bottom: var(--edge-gap) !important; }
 
 /* Hide empty layout sections that might render rounded outlines */
 .tf-front > :empty,
@@ -114,20 +128,12 @@ html, body, .tf-wrap, .tf-front {
 .tf-main:empty,
 .tf-rail:empty,
 .tf-grid:empty,
-#suggestions:empty {
-  display: none !important;
-}
+#suggestions:empty { display: none !important; }
 
-/* If the last container hits the viewport edge, remove extra rounding */
-.tf-front:last-child,
-.tf-wrap:last-child {
-  border-bottom-left-radius: 0;
-  border-bottom-right-radius: 0;
-}
-
-/* Ensure body scroll height isnâ€™t extended by overlay rules */
+/* Ensure body scroll height isn’t extended by overlay rules */
 body { overflow-y: auto; }
 
+/* Cards */
 .card {
   background:var(--card); border:1px solid var(--border); border-radius:14px; padding:12px;
   display:flex; flex-direction:column; gap:8px; min-height:0;
@@ -138,8 +144,9 @@ body { overflow-y: auto; }
 .card h2 { font-size:18px; line-height:1.25; margin:0; }
 .card.hero h2 { font-size:26px; }
 .card .meta { color:var(--muted); font-size:12px; }
-.card .summary { color:#d8e5ff; font-size:14px; }
+.card .summary { color:#dbe5ff; font-size:14px; }
 
+/* Actions */
 .actions { display:flex; gap:.5rem; margin-top:6px; flex-wrap: wrap; }
 .actions button, .actions a {
   padding:.35rem .6rem; border-radius:10px; border:1px solid var(--border); background:#18253a; color:#dfeafd; text-decoration:none;
@@ -161,15 +168,19 @@ body { overflow-y: auto; }
 }
 .icon-btn:hover { background:#1d2b43; }
 
+/* Chips */
 .chips { display:flex; gap:.35rem; flex-wrap:wrap; }
 .chip { font-size:11px; padding:.12rem .45rem; border-radius:999px; background:var(--chip); border:1px solid var(--border); color:#cfe0ff; }
-
 .chip.warn { background: rgba(255, 99, 71, 0.18); border-color: rgba(255, 99, 71, 0.55); color: #ffd9d4; }
+
+/* Grid (legacy, used elsewhere) */
 .tf-grid { display:grid; grid-template-columns: repeat(3,minmax(0,1fr)); gap:14px; padding:14px; }
 @media (max-width: 900px) { .tf-grid { grid-template-columns: repeat(2,minmax(0,1fr)); } }
 
-.tf-wrap { width: min(1400px, 100% - 24px); margin-inline: auto; }
+/* Override old .tf-wrap definition that caused wide side gutters */
+.tf-wrap { padding-inline: var(--container-pad); }
 
+/* Buttons */
 .btn {
   background: var(--accent);
   color: #0b0e14;
@@ -182,12 +193,9 @@ body { overflow-y: auto; }
 .btn:hover { filter: brightness(0.95); }
 .btn.tertiary { background: transparent; color: var(--fg); }
 
-.card-actions {
-  display: flex;
-  gap: 8px;
-  margin-top: 8px;
-}
+.card-actions { display: flex; gap: 8px; margin-top: 8px; }
 
+/* Banner */
 .banner {
   background: var(--card);
   border: 1px solid var(--border);
@@ -198,12 +206,7 @@ body { overflow-y: auto; }
   flex-direction: column;
   gap: 8px;
 }
-
-.banner .meta {
-  color: var(--muted);
-  font-size: 12px;
-}
-
+.banner .meta { color: var(--muted); font-size: 12px; }
 .banner button {
   background: var(--chip);
   color: #dbe8ff;
@@ -213,16 +216,8 @@ body { overflow-y: auto; }
   cursor: pointer;
   align-self: flex-start;
 }
-
-.banner button:hover {
-  background: #1d2b43;
-}
-
-/* Keep suggestion buttons inline and styled identically */
-.banner .row {
-  display: flex;
-  gap: 8px;
-}
+.banner button:hover { background: #1d2b43; }
+.banner .row { display: flex; gap: 8px; }
 
 /* ===== Rail cards ===== */
 .tf-rail { display:flex; flex-direction:column; gap:12px; }
@@ -249,37 +244,24 @@ body { overflow-y: auto; }
 /* domain list for risky domains */
 .domainlist { margin-top:.5rem; }
 
-/* Mic ON state */
-.mic-button.mic-on {
-    background-color: red;
-    color: white;
-}
+/* Mic/Cam state */
+.mic-button.mic-on { background-color: red; color: white; }
+.cam-button.cam-on { background-color: red; color: white; }
 
-/* Cam ON state */
-.cam-button.cam-on {
-    background-color: red;
-    color: white;
-}
-:import-marker
-
-/* ===== Clean card rhythm: clamp + fade (append to panel.css) ===== */
+/* ===== Clean card rhythm: clamp + fade ===== */
 
 /* Tunables */
 :root{
-  --title-lines: 2;
+  --title-lines: 1;             /* single-line titles */
   --summary-lines: 3;           /* visible lines before fade */
   --lh-title: 1.25;
   --lh-body: 1.55;
 }
 
 /* Make each card a column so actions sit at the bottom consistently */
-.card{
-  display: flex;
-  flex-direction: column;
-  min-height: 0;
-}
+.card{ display: flex; flex-direction: column; min-height: 0; }
 
-/* ----- Title: hard clamp to N lines ----- */
+/* ----- Title: hard clamp to one line ----- */
 .card h2{
   display: -webkit-box;
   -webkit-line-clamp: 1;
@@ -293,30 +275,22 @@ body { overflow-y: auto; }
 .card .summary{
   position: relative;
   line-height: var(--lh-body);
-  /* ~3 lines (works regardless of font-size) */
   max-height: calc(var(--summary-lines) * 1em * var(--lh-body));
   overflow: hidden;
-  /* let summary fill available space so actions align */
   flex: 1 1 auto;
 }
-
-/* Fade to the card background for a softer cutoff */
 .card .summary::after{
   content: "";
-  position: absolute;
-  left: 0; right: 0; bottom: 0;
+  position: absolute; left: 0; right: 0; bottom: 0;
   height: calc(1.2em * var(--lh-body));
   pointer-events: none;
   background: linear-gradient(to bottom, rgba(0,0,0,0), var(--card));
 }
 
 /* Keep actions pinned to the bottom of the card */
-.card .actions{
-  margin-top: 8px;      /* your rhythm */
-  flex: 0 0 auto;
-}
+.card .actions{ margin-top: 8px; flex: 0 0 auto; }
 
-/* Optional nicety: on hover, reveal a bit more and soften fade */
+/* Optional: reveal a bit more on hover */
 @media (hover:hover){
   .card:hover .summary{
     max-height: calc((var(--summary-lines) + 1.5) * 1em * var(--lh-body));
@@ -324,10 +298,135 @@ body { overflow-y: auto; }
   .card:hover .summary::after{ opacity: .35; }
 }
 
-/* If you need a full expansion state via JS, toggle `.is-expanded` */
-.card.is-expanded .summary{
-  max-height: none;
+/* Expansion state via JS */
+.card.is-expanded .summary{ max-height: none; }
+.card.is-expanded .summary::after{ display: none; }
+
+/* === Align the main content width without breaking the top pills === */
+:root{
+  --container-max: clamp(1100px, 96vw, 1680px);
+  --container-pad: 16px;
 }
-.card.is-expanded .summary::after{
-  display: none;
+.tf-front,
+.banner {
+  width: min(var(--container-max), 100% - 32px) !important;
+  margin-left: auto !important;
+  margin-right: auto !important;
+  padding-left: var(--container-pad) !important;
+  padding-right: var(--container-pad) !important;
+  box-sizing: border-box;
+}
+.tf-wrap { 
+  width: auto !important;
+  max-width: none !important;
+  padding-left: 0 !important;
+  padding-right: 0 !important;
+}
+.tf-grid {
+  margin-left: 0 !important;
+  margin-right: 0 !important;
+  padding-left: 0 !important;
+  padding-right: 0 !important;
+}
+.tf-main, .tf-leads, .tf-rail {
+  margin-left: 0 !important;
+  margin-right: 0 !important;
+}
+
+/* --- Fix squished summaries inside cards --- */
+:root{
+  --summary-lines: 3;
+  --lh-body: 1.55;
+  --summary-pad-y: 10px;
+  --summary-pad-x: 12px;
+}
+
+.card .summary{
+  padding: var(--summary-pad-y) var(--summary-pad-x) !important;
+  line-height: var(--lh-body);
+  max-height: calc(var(--summary-lines) * 1em * var(--lh-body) + (var(--summary-pad-y) * 2)) !important;
+  overflow: hidden;
+  position: relative;
+  flex: 0 0 auto;
+  box-sizing: border-box;
+}
+
+.card .summary::after{
+  content: "";
+  position: absolute;
+  left: 0; right: 0; bottom: 0;
+  height: calc(0.9em * var(--lh-body));
+  pointer-events: none;
+  background: linear-gradient(to bottom, rgba(0,0,0,0), var(--card));
+}
+
+@media (min-width: 1400px){
+  :root{ --summary-lines: 4; }
+}
+
+/* === Scrollable summaries (fixed height) + pinned actions === */
+
+/* tune lines & padding you already set */
+:root{
+  --summary-lines: 8;          /* show ~8 lines before scroll */
+  --lh-body: 1.55;
+  --summary-pad-y: 10px;
+  --summary-pad-x: 12px;
+}
+
+/* Keep the card as a column so actions sit at the bottom */
+.card{
+  display:flex;
+  flex-direction:column;
+  min-height:0;
+}
+
+/* Fixed-height, scrollable summary area */
+.card .summary{
+  padding: var(--summary-pad-y) var(--summary-pad-x) !important;
+  line-height: var(--lh-body);
+  height: calc(var(--summary-lines) * 1em * var(--lh-body) + (var(--summary-pad-y) * 2)) !important;
+  max-height: none !important;          /* use fixed height instead of max */
+  overflow: auto;                       /* <-- scrolling enabled */
+  -webkit-overflow-scrolling: touch;    /* smooth scroll on iOS */
+  scrollbar-gutter: stable both-edges;  /* avoids layout shift when bar shows */
+  box-sizing: border-box;
+}
+
+/* Fade overlay only when idle; hide it when the user can interact */
+.card .summary::after{
+  content: "";
+  position: sticky;            /* stays at the bottom of the scroll area */
+  display:block;
+  height: calc(0.9em * var(--lh-body));
+  margin-top: calc(-0.9em * var(--lh-body));
+  background: linear-gradient(to bottom, rgba(0,0,0,0), var(--card));
+  pointer-events: none;
+}
+
+/* Remove the fade when user hovers or focuses to read/scroll */
+.card .summary:hover::after,
+.card .summary:focus::after { display:none; }
+
+/* Make the area keyboard-scrollable & clearly focusable */
+.card .summary:focus{
+  outline: 2px solid #2f81f7;
+  outline-offset: 2px;
+  border-radius: 12px;
+}
+
+/* Pin actions to the bottom of the card */
+.card .actions{
+  margin-top: auto;   /* pushes actions down regardless of summary length */
+  flex: 0 0 auto;
+}
+
+/* Compact, themed scrollbar for the summary area (optional) */
+.card .summary::-webkit-scrollbar{ width: 8px; height: 8px; }
+.card .summary::-webkit-scrollbar-track{ background: transparent; }
+.card .summary::-webkit-scrollbar-thumb{
+  background: linear-gradient(180deg, rgba(100,210,255,0.55), rgba(124,77,255,0.55));
+  border-radius: 999px;
+  border: 2px solid transparent;
+  background-clip: padding-box;
 }

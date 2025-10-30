@@ -90,7 +90,7 @@ aside, main, .tf-panel, .tf-rail, .tf-main, .tf-leads, .tf-grid, .tf-nav{
   display:flex; flex-wrap:wrap; gap:10px;
 }
 .tf-nav .chip, .tf-nav button, .tf-nav a{
-  padding: 8px 12px;
+  padding: 8px 6px;
   border-radius: 999px;
   border:1px solid var(--border);
   background: rgba(2,6,23,0.35);

@@ -1,5 +1,4 @@
-﻿
-let latestPrivacy = {};
+﻿let latestPrivacy = {};
 // ---- escapeHTML guard ----
 if (typeof escapeHTML === "undefined") {
   function escapeHTML(str) {
@@ -34,43 +33,6 @@ let latestItems = [];
 const listGrid= document.getElementById("grid"); // optional / hidden
 const nav     = document.getElementById("filters");
 const permBarId = "tf-perm-banner";
-
-// ---- On-page summarizer (panel context) ----
-let panelSummarizer = null;
-let panelSummQueue = [];
-let panelSummRunning = false;
-const SUMM_LANG = 'en';
-async function getPanelSummarizer() {
-  try {
-    const API = (globalThis.Summarizer || (globalThis.ai && globalThis.ai.summarizer));
-    if (!API) return null;
-    const caps = API.capabilities ? await API.capabilities() : (API.availability ? await API.availability() : null);
-    if (!caps || caps.available === 'no') return null;
-    if (!panelSummarizer) {
-      // Keep create minimal for compatibility; always specify output language
-      panelSummarizer = await API.create({ type: 'key-points', length: 'short', output: { language: SUMM_LANG } });
-    }
-    return panelSummarizer;
-  } catch { return null; }
-}
-async function runPanelSummaries() {
-  if (panelSummRunning) return;
-  panelSummRunning = true;
-  const inst = await getPanelSummarizer();
-  if (!inst) { panelSummQueue = []; panelSummRunning = false; return; }
-  while (panelSummQueue.length) {
-    const item = panelSummQueue.shift();
-    try {
-      // Keep summarize options minimal; always pass output language
-      const out = await inst.summarize((item.fullText || '').slice(0, 1200), { output: { language: SUMM_LANG } });
-      const summary = typeof out === 'string' ? out : (out && out.summary) || '';
-      if (summary) {
-        chrome.runtime.sendMessage({ type: 'TAB_SUMMARY_FROM_PANEL', tabId: item.tabId, summary }).catch(()=>{});
-      }
-    } catch {}
-  }
-  panelSummRunning = false;
-}
 
 // ---------- utils ----------
 function timeAgo(ts) {
@@ -278,8 +240,8 @@ function card(it, { variant="standard" } = {}) {
   el.appendChild(h);
   const meta = document.createElement("div");
   meta.className = "meta";
-  // Prefer earliest history-backed time for display
-  const openedAt = it.firstSeenHistory || it.firstSeen || it.updatedAt || Date.now();
+  // Prefer history-backed time for display if available (most accurate)
+  const openedAt = it.firstSeenHistory ?? it.firstSeen ?? Date.now();
   meta.textContent = `${it.domain || ""} - opened ${timeAgo(openedAt)}`;
   el.appendChild(meta);
 
@@ -290,8 +252,8 @@ function card(it, { variant="standard" } = {}) {
   el.appendChild(badgesRow(it));
 
   // Entities chips (if we have them)
-  const ents = entitiesBar(it.entities);
-  if (ents) el.appendChild(ents);
+  // const ents = entitiesBar(it.entities);
+  // if (ents) el.appendChild(ents);
 
   // Summary (with content-signature requeue)
   const sum = document.createElement("div");
@@ -391,13 +353,6 @@ function renderSuggestions(suggestedBundles = [], tabsById) {
 
 
 function render(items, suggestedBundles = [], bundles = []) {
-  // Queue panel-side summaries for items missing summary
-  try {
-    const need = (items||[]).filter(it => it.fullText && it.fullText.length >= 120 && !it.summary);
-    const queuedIds = new Set(panelSummQueue.map(x=>x.tabId));
-    for (const it of need) { if (!queuedIds.has(it.tabId)) panelSummQueue.push(it); }
-    runPanelSummaries();
-  } catch {}
   latestItems = Array.isArray(items) ? items : [];
   const anyCats = items.some(it => Array.isArray(it.categories) && it.categories.length);
   renderFilters(items, bundles);
@@ -616,7 +571,3 @@ async function maybeRenderPermissionBanner() {
     }
   }
 }
-
-
-
-
