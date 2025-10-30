@@ -60,7 +60,7 @@ async function hydrate() {
         tabLink.appendChild(title);
 
         const removeBtn = document.createElement("button");
-        removeBtn.textContent = "Remove";
+        removeBtn.textContent = "x";
         removeBtn.onclick = async (e) => {
           e.preventDefault(); e.stopPropagation();
           removeBtn.disabled = true;
@@ -201,7 +201,7 @@ async function hydrate() {
             row.style.display = "flex"; row.style.alignItems = "center"; row.style.gap = "8px";
             const fav = document.createElement("img"); fav.src = t.favicon || ""; fav.className = "favicon";
             const title = document.createElement("span"); title.textContent = t.title || t.url;
-            const addBtn = document.createElement("button"); addBtn.textContent = "Add";
+            const addBtn = document.createElement("button"); addBtn.textContent = "+";
             addBtn.onclick = async () => {
               addBtn.disabled = true;
               await new Promise((resolve) => {

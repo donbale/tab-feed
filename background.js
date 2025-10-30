@@ -1,3 +1,10 @@
+﻿// top of background.js
+const SUMM_LANG = ((typeof navigator !== "undefined" && navigator.language) || "en").split("-")[0] || "en";
+const withLang = (opts = {}) => ({
+  ...opts,
+  output: { ...(opts.output || {}), language: SUMM_LANG }
+});
+
 // background.js — TabFeed (panel-only AI, persistent storage, stable updates)
 console.log("[TabFeed] background boot", new Date().toISOString());
 
@@ -64,7 +71,18 @@ ${existingBundleTitles}`;
     }
 
     if (Array.isArray(parsed)) {
-      suggestedBundles = parsed.filter(b => b.title && Array.isArray(b.tabIds) && b.tabIds.length >= 3);
+      // Accept valid bundles then filter out ones too similar to existing bundles
+      const raw = parsed.filter(b => b.title && Array.isArray(b.tabIds) && b.tabIds.length >= 3);
+      const existing = bundles.map(b => ({ id: b.id, title: b.title, tabIds: Array.isArray(b.tabIds) ? b.tabIds.slice() : [] }));
+      function jaccard(a, b) {
+        const A = new Set(a), B = new Set(b);
+        let inter = 0; for (const x of A) if (B.has(x)) inter++;
+        const uni = new Set([...A, ...B]).size || 1;
+        return inter / uni;
+      }
+      suggestedBundles = raw.filter(sug => {
+        return !existing.some(ex => jaccard(sug.tabIds, ex.tabIds) >= 0.7);
+      });
     } else {
       suggestedBundles = [];
     }
@@ -83,18 +101,23 @@ function scheduleSuggestBundles() {
 
 // ---------- Summarizer (moved from panel.js) ----------
 let summarizerInst = null;
+
 async function getSummarizer() {
   try {
     const API = globalThis.Summarizer || (globalThis.ai && globalThis.ai.summarizer);
     if (!API) return null;
-    const caps = API.capabilities ? await API.capabilities() : await API.availability?.();
+
+    const caps = API.capabilities
+      ? await API.capabilities()
+      : (API.availability ? await API.availability() : null);
+
     if (!caps || caps.available === "no") return null;
+
     if (!summarizerInst) {
+      // Minimal options — avoid language/format keys that some runtimes reject
       summarizerInst = await API.create({
         type: "key-points",
-        length: "short",
-        format: "markdown",
-        output: { language: "en" }
+        length: "short"
       });
     }
     return summarizerInst;
@@ -103,17 +126,22 @@ async function getSummarizer() {
     return null;
   }
 }
+
 async function summarizeMD(text) {
   const inst = await getSummarizer();
   if (!inst) return null;
+
+  const chunk = (text || "").slice(0, 1000);
   try {
-    const out = await inst.summarize((text || "").slice(0, 1000), {
-      format: "markdown",
-      output: { language: "en" }
-    });
-    return typeof out === "string" ? out : (out?.summary || "");
+    // First try bare call
+    let out = await inst.summarize(chunk);
+    if (!out && typeof out !== "string") {
+      // Fallback: some runtimes want an options object, but we still avoid language
+      out = await inst.summarize(chunk, {});
+    }
+    return typeof out === "string" ? out : (out && out.summary) || "";
   } catch (e) {
-    console.warn("[TabFeed] Summarize failed", e);
+    console.warn("[TabFeed][bg] Summarize failed", e);
     return null;
   }
 }
@@ -150,8 +178,8 @@ async function getLM() {
     const LM = globalThis.LanguageModel || (globalThis.ai && globalThis.ai.languageModel);
     if (!LM) return null;
     const session = await LM.create?.({
-      expectedInputs:  [{ type: "text", languages: ["en"] }],
-      expectedOutputs: [{ type: "text", languages: ["en"] }]
+      expectedInputs:  [{ type: "text", languages: [SUMM_LANG] }],
+      expectedOutputs: [{ type: "text", languages: [SUMM_LANG] }]
     });
     return session || null;
   } catch (e) {
@@ -353,15 +381,16 @@ async function ensureFirstSeenFromHistory(it) {
     const visits = await chrome.history.getVisits({ url });
     if (Array.isArray(visits) && visits.length) {
       const earliest = Math.min.apply(null, visits.map(v => v.visitTime || Date.now()));
-      const existing = it.firstSeen || it.updatedAt || Date.now();
-      if (earliest && earliest < existing) {
-        const cur = tabsIndex.get(it.tabId);
-        if (cur) {
-          cur.firstSeen = earliest;
-          cur.updatedAt = Date.now();
-          tabsIndex.set(it.tabId, cur);
-          scheduleSaveAndBroadcast();
-        }
+      const cur = tabsIndex.get(it.tabId);
+      if (cur && earliest) {
+        // Persist explicit history-based timestamp
+        cur.firstSeenHistory = earliest;
+        // Keep firstSeen as the minimum of known values so other code stays consistent
+        const existing = cur.firstSeen || it.updatedAt || Date.now();
+        cur.firstSeen = Math.min(existing, earliest);
+        cur.updatedAt = Date.now();
+        tabsIndex.set(it.tabId, cur);
+        scheduleSaveAndBroadcast();
       }
     }
   } catch (e) {
@@ -586,6 +615,22 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       if (msg?.type === "GET_TABS_NOW") {
         const { tabs = [], suggestedBundles = [], bundles = [] } = await chrome.storage.local.get(["tabs", "suggestedBundles", "bundles"]);
         sendResponse?.({ ok: true, tabs, suggestedBundles, bundles }); return;
+      }
+
+      // Summary updates arriving from the panel (page context)
+      if (msg?.type === "TAB_SUMMARY_FROM_PANEL") {
+        try {
+          const { tabId, summary } = msg;
+          const it = tabsIndex.get(tabId);
+          if (it && typeof summary === 'string' && summary.trim()) {
+            it.summary = summary;
+            it.updatedAt = Date.now();
+            tabsIndex.set(tabId, it);
+            await saveAndBroadcast();
+          }
+        } catch {}
+        sendResponse?.({ ok: true });
+        return;
       }
 
       if (msg?.type === "TAB_CONTENT" && sender.tab?.id != null) {
@@ -1040,10 +1085,7 @@ async function buildSessionStats() {
   const hot = tabs.map(t => {
     pruneRequests(t.id);
     const rec = requestLog.get(t.id) || {count1m:0};
-    
-  
-
-  return {tabId:t.id, title:t.title||"", count1m: rec.count1m||0};
+    return {tabId:t.id, title:t.title||"", count1m: rec.count1m||0};
   }).sort((a,b)=>b.count1m - a.count1m).slice(0,5);
 
   // context score based on titles similarity
@@ -1160,7 +1202,6 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     return true;
   }
 });
-
 
 chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   if (msg === "PANEL_PING" || msg?.type === "PANEL_PING") {

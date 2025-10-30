@@ -1,3 +1,5 @@
+﻿@import url("futuristic.css");
+
 :root {
   --bg: #0b1220;
   --card: #151e2e;
@@ -5,16 +7,48 @@
   --border: #25334a;
   --chip: #213047;
   --brand: #f4d35e;
+
+  /* layout tokens */
+  --container-max: 1280px;
+  --container-pad: 16px;
+  /* edge gap controls the outer left/right margin; set to 50% of container-pad */
+  --edge-gap: calc(var(--container-pad) / 2);
+  --section-radius: 20px;
 }
 
 * { box-sizing: border-box; }
-html, body { margin:0; padding:0; background:var(--bg); color:#e6eefc; font:14px/1.5 "Google Sans", Roboto, "Noto Sans", "Segoe UI", -apple-system, BlinkMacSystemFont, "Helvetica Neue", Arial, sans-serif; }
+html, body {
+  margin:0; padding:0; background:var(--bg); color:#e6eefc;
+  font:14px/1.5 "Google Sans", Roboto, "Noto Sans", "Segoe UI", -apple-system, BlinkMacSystemFont, "Helvetica Neue", Arial, sans-serif;
+}
 
+/* ===================== */
+/*  Shared CONTAINER rule */
+/* ===================== */
+.tf-header,
+.tf-nav,
+.banner,
+.tf-front,
+.tf-wrap {
+  width: min(var(--container-max), 100% - calc(var(--edge-gap) * 2));
+  margin-inline: auto;
+  box-sizing: border-box;
+  padding-inline: var(--container-pad);
+}
+
+/* Remove any older margins that could misalign widths */
+.tf-header,
+.tf-nav,
+.banner { margin-inline: auto; }
+
+/* Header */
 .tf-header {
   display:flex; justify-content:space-between; align-items:center;
-  padding:10px 14px; border-bottom:1px solid var(--border);
-  position:sticky; top:0; background:linear-gradient(180deg, rgba(11,18,32,.96), rgba(11,18,32,.92));
-  backdrop-filter: blur(8px); z-index:10;
+  padding:10px var(--container-pad);
+  border-bottom:1px solid var(--border);
+  position: static; /* non-sticky */
+  background:linear-gradient(180deg, rgba(11,18,32,.96), rgba(11,18,32,.92));
+  border-radius: var(--section-radius);
 }
 .tf-header .brand { font-weight:800; letter-spacing: .2px; color:var(--brand); font-family: inherit; }
 .tf-header .brand { display:inline-flex; align-items:center; gap:8px; }
@@ -23,7 +57,13 @@ html, body { margin:0; padding:0; background:var(--bg); color:#e6eefc; font:14px
 .tf-header .privacy-link:hover { text-decoration: underline; }
 .tf-header .meta  { color:var(--muted); }
 
-.tf-nav { display:flex; gap:.5rem; flex-wrap:wrap; padding:10px 14px; border-bottom:1px solid var(--border); }
+/* Nav */
+.tf-nav {
+  display:flex; gap:.5rem; flex-wrap:wrap;
+  padding:10px var(--container-pad);
+  border-bottom:1px solid var(--border);
+  border-radius: var(--section-radius);
+}
 .tf-nav button {
   padding:.32rem .7rem; border:1px solid var(--border); border-radius:999px;
   background:var(--chip); color:#dbe8ff; cursor:pointer;
@@ -38,27 +78,27 @@ html, body { margin:0; padding:0; background:var(--bg); color:#e6eefc; font:14px
   color: #dbe8ff;
   text-decoration: none;
 }
-
-.tf-nav-btn:hover {
-  background: #1d2b43;
+.tf-nav-btn .icon-bundle{
+  display:inline-block; width:14px; height:14px; vertical-align:middle; margin-right:4px;
+  background-image: url('data:image/svg+xml;utf8,<svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="%23dbe8ff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 7h5l2 2h9v8a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2z"/><path d="M4 7v10a2 2 0 0 0 2 2h12"/></svg>');
+  background-size: contain; background-repeat:no-repeat;
 }
+.tf-nav-btn:hover { background: #1d2b43; }
 
-.separator {
-  width: 1px;
-  background-color: var(--border);
-  margin: 0 8px;
-}
+.separator { width: 1px; background-color: var(--border); margin: 0 8px; }
 
+/* Front layout */
 .tf-front {
   display:grid;
   grid-template-columns: 1.15fr 1fr 320px;
   grid-template-rows: auto auto 1fr;
   gap:14px;
-  padding:14px;
+  padding:14px var(--container-pad);
   grid-template-areas:
-    "hero   hero   rail"
-    "leads  leads  rail"
+    "hero   hero   hero"
+    "leads  leads  leads"
     "main   main   rail";
+  border-radius: var(--section-radius);
 }
 @media (max-width: 1180px) {
   .tf-front { grid-template-columns: 1fr; grid-template-areas: "hero" "leads" "main" "rail"; }
@@ -71,18 +111,42 @@ html, body { margin:0; padding:0; background:var(--bg); color:#e6eefc; font:14px
 @media (max-width: 900px) { .tf-main { grid-template-columns: repeat(2,minmax(0,1fr)); } }
 .tf-rail  { grid-area:rail; display:flex; flex-direction:column; gap:14px; }
 
+/* Hide empty hero/leads sections to remove stray borders/gaps */
+.tf-hero:empty, .tf-leads:empty { display: none; }
+
+/* --- Bottom spacing cleanup (fix units) --- */
+html, body, .tf-wrap, .tf-front {
+  margin-bottom: 0 !important;
+  padding-bottom: 0 !important;
+}
+/* Small, consistent bottom gap below the front panel */
+.tf-front { margin-bottom: var(--edge-gap) !important; }
+
+/* Hide empty layout sections that might render rounded outlines */
+.tf-front > :empty,
+.tf-wrap > :empty,
+.tf-main:empty,
+.tf-rail:empty,
+.tf-grid:empty,
+#suggestions:empty { display: none !important; }
+
+/* Ensure body scroll height isn’t extended by overlay rules */
+body { overflow-y: auto; }
+
+/* Cards */
 .card {
   background:var(--card); border:1px solid var(--border); border-radius:14px; padding:12px;
   display:flex; flex-direction:column; gap:8px; min-height:0;
 }
 .card:hover { outline:1px solid #2b3e5f; cursor:pointer; }
-.card .thumb { width:100%; max-height:220px; object-fit:cover; border-radius:10px; background:#0d1524; }
-.card .thumb.hero { max-height:360px; }
+.card .thumb { width:100%; height:160px; object-fit:cover; border-radius:10px; background:#0d1524; }
+.card .thumb.hero { height:160px; }
 .card h2 { font-size:18px; line-height:1.25; margin:0; }
 .card.hero h2 { font-size:26px; }
 .card .meta { color:var(--muted); font-size:12px; }
-.card .summary { color:#d8e5ff; font-size:14px; }
+.card .summary { color:#dbe5ff; font-size:14px; }
 
+/* Actions */
 .actions { display:flex; gap:.5rem; margin-top:6px; flex-wrap: wrap; }
 .actions button, .actions a {
   padding:.35rem .6rem; border-radius:10px; border:1px solid var(--border); background:#18253a; color:#dfeafd; text-decoration:none;
@@ -90,14 +154,33 @@ html, body { margin:0; padding:0; background:var(--bg); color:#e6eefc; font:14px
 .actions button, .actions a { white-space: nowrap; }
 .actions a:hover, .actions button:hover { background:#1d2b43; }
 
+/* Icon buttons for tab actions */
+.icon-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  padding: .35rem .6rem;
+  border-radius: 10px;
+  border: 1px solid var(--border);
+  background: #18253a;
+  color: #dfeafd;
+}
+.icon-btn:hover { background:#1d2b43; }
+
+/* Chips */
 .chips { display:flex; gap:.35rem; flex-wrap:wrap; }
 .chip { font-size:11px; padding:.12rem .45rem; border-radius:999px; background:var(--chip); border:1px solid var(--border); color:#cfe0ff; }
+.chip.warn { background: rgba(255, 99, 71, 0.18); border-color: rgba(255, 99, 71, 0.55); color: #ffd9d4; }
 
+/* Grid (legacy, used elsewhere) */
 .tf-grid { display:grid; grid-template-columns: repeat(3,minmax(0,1fr)); gap:14px; padding:14px; }
 @media (max-width: 900px) { .tf-grid { grid-template-columns: repeat(2,minmax(0,1fr)); } }
 
-.tf-wrap { width: min(1400px, 100% - 24px); margin-inline: auto; }
+/* Override old .tf-wrap definition that caused wide side gutters */
+.tf-wrap { padding-inline: var(--container-pad); }
 
+/* Buttons */
 .btn {
   background: var(--accent);
   color: #0b0e14;
@@ -110,12 +193,9 @@ html, body { margin:0; padding:0; background:var(--bg); color:#e6eefc; font:14px
 .btn:hover { filter: brightness(0.95); }
 .btn.tertiary { background: transparent; color: var(--fg); }
 
-.card-actions {
-  display: flex;
-  gap: 8px;
-  margin-top: 8px;
-}
+.card-actions { display: flex; gap: 8px; margin-top: 8px; }
 
+/* Banner */
 .banner {
   background: var(--card);
   border: 1px solid var(--border);
@@ -126,12 +206,7 @@ html, body { margin:0; padding:0; background:var(--bg); color:#e6eefc; font:14px
   flex-direction: column;
   gap: 8px;
 }
-
-.banner .meta {
-  color: var(--muted);
-  font-size: 12px;
-}
-
+.banner .meta { color: var(--muted); font-size: 12px; }
 .banner button {
   background: var(--chip);
   color: #dbe8ff;
@@ -141,10 +216,8 @@ html, body { margin:0; padding:0; background:var(--bg); color:#e6eefc; font:14px
   cursor: pointer;
   align-self: flex-start;
 }
-
-.banner button:hover {
-  background: #1d2b43;
-}
+.banner button:hover { background: #1d2b43; }
+.banner .row { display: flex; gap: 8px; }
 
 /* ===== Rail cards ===== */
 .tf-rail { display:flex; flex-direction:column; gap:12px; }
@@ -171,14 +244,189 @@ html, body { margin:0; padding:0; background:var(--bg); color:#e6eefc; font:14px
 /* domain list for risky domains */
 .domainlist { margin-top:.5rem; }
 
-/* Mic ON state */
-.mic-button.mic-on {
-    background-color: red;
-    color: white;
+/* Mic/Cam state */
+.mic-button.mic-on { background-color: red; color: white; }
+.cam-button.cam-on { background-color: red; color: white; }
+
+/* ===== Clean card rhythm: clamp + fade ===== */
+
+/* Tunables */
+:root{
+  --title-lines: 1;             /* single-line titles */
+  --summary-lines: 3;           /* visible lines before fade */
+  --lh-title: 1.25;
+  --lh-body: 1.55;
 }
 
-/* Cam ON state */
-.cam-button.cam-on {
-    background-color: red;
-    color: white;
+/* Make each card a column so actions sit at the bottom consistently */
+.card{ display: flex; flex-direction: column; min-height: 0; }
+
+/* ----- Title: hard clamp to one line ----- */
+.card h2{
+  display: -webkit-box;
+  -webkit-line-clamp: 1;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  line-height: var(--lh-title);
+}
+
+/* ----- Summary: fixed visual height + soft fade ----- */
+.card .summary{
+  position: relative;
+  line-height: var(--lh-body);
+  max-height: calc(var(--summary-lines) * 1em * var(--lh-body));
+  overflow: hidden;
+  flex: 1 1 auto;
+}
+.card .summary::after{
+  content: "";
+  position: absolute; left: 0; right: 0; bottom: 0;
+  height: calc(1.2em * var(--lh-body));
+  pointer-events: none;
+  background: linear-gradient(to bottom, rgba(0,0,0,0), var(--card));
+}
+
+/* Keep actions pinned to the bottom of the card */
+.card .actions{ margin-top: 8px; flex: 0 0 auto; }
+
+/* Optional: reveal a bit more on hover */
+@media (hover:hover){
+  .card:hover .summary{
+    max-height: calc((var(--summary-lines) + 1.5) * 1em * var(--lh-body));
+  }
+  .card:hover .summary::after{ opacity: .35; }
+}
+
+/* Expansion state via JS */
+.card.is-expanded .summary{ max-height: none; }
+.card.is-expanded .summary::after{ display: none; }
+
+/* === Align the main content width without breaking the top pills === */
+:root{
+  --container-max: clamp(1100px, 96vw, 1680px);
+  --container-pad: 16px;
+}
+.tf-front,
+.banner {
+  width: min(var(--container-max), 100% - 32px) !important;
+  margin-left: auto !important;
+  margin-right: auto !important;
+  padding-left: var(--container-pad) !important;
+  padding-right: var(--container-pad) !important;
+  box-sizing: border-box;
+}
+.tf-wrap { 
+  width: auto !important;
+  max-width: none !important;
+  padding-left: 0 !important;
+  padding-right: 0 !important;
+}
+.tf-grid {
+  margin-left: 0 !important;
+  margin-right: 0 !important;
+  padding-left: 0 !important;
+  padding-right: 0 !important;
+}
+.tf-main, .tf-leads, .tf-rail {
+  margin-left: 0 !important;
+  margin-right: 0 !important;
+}
+
+/* --- Fix squished summaries inside cards --- */
+:root{
+  --summary-lines: 3;
+  --lh-body: 1.55;
+  --summary-pad-y: 10px;
+  --summary-pad-x: 12px;
+}
+
+.card .summary{
+  padding: var(--summary-pad-y) var(--summary-pad-x) !important;
+  line-height: var(--lh-body);
+  max-height: calc(var(--summary-lines) * 1em * var(--lh-body) + (var(--summary-pad-y) * 2)) !important;
+  overflow: hidden;
+  position: relative;
+  flex: 0 0 auto;
+  box-sizing: border-box;
+}
+
+.card .summary::after{
+  content: "";
+  position: absolute;
+  left: 0; right: 0; bottom: 0;
+  height: calc(0.9em * var(--lh-body));
+  pointer-events: none;
+  background: linear-gradient(to bottom, rgba(0,0,0,0), var(--card));
+}
+
+@media (min-width: 1400px){
+  :root{ --summary-lines: 4; }
+}
+
+/* === Scrollable summaries (fixed height) + pinned actions === */
+
+/* tune lines & padding you already set */
+:root{
+  --summary-lines: 8;          /* show ~8 lines before scroll */
+  --lh-body: 1.55;
+  --summary-pad-y: 10px;
+  --summary-pad-x: 12px;
+}
+
+/* Keep the card as a column so actions sit at the bottom */
+.card{
+  display:flex;
+  flex-direction:column;
+  min-height:0;
+}
+
+/* Fixed-height, scrollable summary area */
+.card .summary{
+  padding: var(--summary-pad-y) var(--summary-pad-x) !important;
+  line-height: var(--lh-body);
+  height: calc(var(--summary-lines) * 1em * var(--lh-body) + (var(--summary-pad-y) * 2)) !important;
+  max-height: none !important;          /* use fixed height instead of max */
+  overflow: auto;                       /* <-- scrolling enabled */
+  -webkit-overflow-scrolling: touch;    /* smooth scroll on iOS */
+  scrollbar-gutter: stable both-edges;  /* avoids layout shift when bar shows */
+  box-sizing: border-box;
+}
+
+/* Fade overlay only when idle; hide it when the user can interact */
+.card .summary::after{
+  content: "";
+  position: sticky;            /* stays at the bottom of the scroll area */
+  display:block;
+  height: calc(0.9em * var(--lh-body));
+  margin-top: calc(-0.9em * var(--lh-body));
+  background: linear-gradient(to bottom, rgba(0,0,0,0), var(--card));
+  pointer-events: none;
+}
+
+/* Remove the fade when user hovers or focuses to read/scroll */
+.card .summary:hover::after,
+.card .summary:focus::after { display:none; }
+
+/* Make the area keyboard-scrollable & clearly focusable */
+.card .summary:focus{
+  outline: 2px solid #2f81f7;
+  outline-offset: 2px;
+  border-radius: 12px;
+}
+
+/* Pin actions to the bottom of the card */
+.card .actions{
+  margin-top: auto;   /* pushes actions down regardless of summary length */
+  flex: 0 0 auto;
+}
+
+/* Compact, themed scrollbar for the summary area (optional) */
+.card .summary::-webkit-scrollbar{ width: 8px; height: 8px; }
+.card .summary::-webkit-scrollbar-track{ background: transparent; }
+.card .summary::-webkit-scrollbar-thumb{
+  background: linear-gradient(180deg, rgba(100,210,255,0.55), rgba(124,77,255,0.55));
+  border-radius: 999px;
+  border: 2px solid transparent;
+  background-clip: padding-box;
 }
